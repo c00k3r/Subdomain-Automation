@@ -1,0 +1,19 @@
+===================================================
+Passive Subdomain Recon Automation Tool v2
+===================================================
+
+Target Domain : hackerone.com
+
+Unique Subdomains : 24
+
+Execution Time : 17 seconds
+
+Results File :
+
+output/hackerone.com/subdomains.txt
+
+Generated :
+
+Thu Jul 30 10:50:53 PM IST 2026
+
+===================================================

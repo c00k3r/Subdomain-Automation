@@ -2,8 +2,13 @@ a.ns.hackerone.com
 api.hackerone.com
 autodiscover.hackerone.com
 b.ns.hackerone.com
+design.hackerone.com
 docs.hackerone.com
+events.hackerone.com
+go.hackerone.com
 gslink.hackerone.com
+info.hackerone.com
+links.hackerone.com
 mail2.hackerone.com
 mail.hackerone.com
 managed.hackerone.com

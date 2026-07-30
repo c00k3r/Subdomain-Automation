@@ -13,6 +13,8 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+START_TIME=$(date +%s)
+
 # ---------------- Banner ----------------
 clear
 
@@ -26,7 +28,6 @@ echo -e "${NC}"
 if [ -z "$1" ]; then
     echo -e "${RED}[!] Usage:${NC} ./recon.sh <domain>"
     echo ""
-    echo "Example:"
     echo "./recon.sh hackerone.com"
     exit 1
 fi
@@ -36,8 +37,8 @@ OUTPUT_DIR="output/$DOMAIN"
 
 echo -e "${CYAN}Target          :${NC} $DOMAIN"
 echo -e "${CYAN}Output Folder   :${NC} $OUTPUT_DIR"
-echo ""
 
+echo ""
 echo "-----------------------------------------------------------"
 
 # ---------------- Dependency Check ----------------
@@ -47,19 +48,17 @@ if ! command -v subfinder >/dev/null 2>&1; then
     echo -e "${RED}FAILED${NC}"
     echo ""
     echo "Subfinder is not installed."
-    echo ""
     echo "Install using:"
-    echo ""
     echo "go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
     exit 1
 fi
 
 echo -e "${GREEN}✓${NC}"
 
-# ---------------- Create Output ----------------
+# ---------------- Output Directory ----------------
 mkdir -p "$OUTPUT_DIR"
 
-# ---------------- Run Subfinder ----------------
+# ---------------- Enumeration ----------------
 printf "[2/4] Running Subfinder......... "
 
 subfinder -d "$DOMAIN" \
@@ -78,16 +77,40 @@ fi
 # ---------------- Remove Duplicates ----------------
 printf "[3/4] Removing Duplicates...... "
 
-sort -u \
-"$OUTPUT_DIR/subdomains.txt" \
+sort -u "$OUTPUT_DIR/subdomains.txt" \
 -o "$OUTPUT_DIR/subdomains.txt"
 
 echo -e "${GREEN}✓${NC}"
 
-# ---------------- Count ----------------
+# ---------------- Statistics ----------------
 TOTAL=$(wc -l < "$OUTPUT_DIR/subdomains.txt")
 
+END_TIME=$(date +%s)
+TIME_TAKEN=$((END_TIME - START_TIME))
+
 printf "[4/4] Generating Report......... "
+
+cat << EOF > "$OUTPUT_DIR/summary.txt"
+===================================================
+Passive Subdomain Recon Automation Tool v2
+===================================================
+
+Target Domain : $DOMAIN
+
+Unique Subdomains : $TOTAL
+
+Execution Time : ${TIME_TAKEN} seconds
+
+Results File :
+
+$OUTPUT_DIR/subdomains.txt
+
+Generated :
+
+$(date)
+
+===================================================
+EOF
 
 echo -e "${GREEN}✓${NC}"
 
@@ -96,15 +119,15 @@ echo "-----------------------------------------------------------"
 echo ""
 
 echo -e "${GREEN}Scan Summary${NC}"
-echo ""
-
-echo -e "Target Domain      : $DOMAIN"
-echo -e "Unique Subdomains  : $TOTAL"
-echo -e "Output Directory   : $OUTPUT_DIR"
-echo -e "Results File       : subdomains.txt"
 
 echo ""
+echo "Target Domain      : $DOMAIN"
+echo "Unique Subdomains  : $TOTAL"
+echo "Execution Time     : ${TIME_TAKEN} seconds"
+echo "Summary Report     : $OUTPUT_DIR/summary.txt"
+echo "Results File       : $OUTPUT_DIR/subdomains.txt"
 
+echo ""
 echo -e "${BLUE}===========================================================${NC}"
 echo -e "${GREEN}          Scan Completed Successfully${NC}"
 echo -e "${BLUE}===========================================================${NC}"
