@@ -1,68 +1,89 @@
 #!/bin/bash
 
-# ============================================
-# Passive Subdomain Recon Script
-# Author: Your Name
-# Tool Used: Subfinder
-# ============================================
+source config.sh
+source functions.sh
 
-# Colors
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+START_TIME=$(date +%s)
 
-# Banner
-echo -e "${BLUE}"
-echo "=============================================="
-echo "      Passive Subdomain Recon Automation"
-echo "=============================================="
-echo -e "${NC}"
+show_banner
 
-# Check if a domain was provided
-if [ -z "$1" ]; then
-    echo -e "${RED}[!] Usage:${NC} ./recon.sh <domain>"
-    echo "Example:"
-    echo "./recon.sh example.com"
-    exit 1
-fi
+validate_input "$@"
 
-DOMAIN=$1
+OUTPUT_DIR="output/$DOMAIN"
 
-# Check if Subfinder is installed
-if ! command -v subfinder &> /dev/null; then
-    echo -e "${RED}[!] Subfinder is not installed.${NC}"
-    exit 1
-fi
-
-# Create output directory
-mkdir -p output
-
-echo -e "${YELLOW}[+] Target:${NC} $DOMAIN"
-echo -e "${YELLOW}[+] Enumerating subdomains...${NC}"
-
-# Run Subfinder
-subfinder -d "$DOMAIN" -silent -o output/subdomains.txt
-
-# Check if output exists
-if [ ! -f output/subdomains.txt ]; then
-    echo -e "${RED}[!] No output generated.${NC}"
-    exit 1
-fi
-
-# Remove duplicate entries
-sort -u output/subdomains.txt -o output/subdomains.txt
-
-# Count results
-TOTAL=$(wc -l < output/subdomains.txt)
+echo -e "${CYAN}Target          :${NC} $DOMAIN"
+echo -e "${CYAN}Output Folder   :${NC} $OUTPUT_DIR"
 
 echo ""
-echo -e "${GREEN}[✓] Enumeration Completed Successfully!${NC}"
-echo -e "${GREEN}[✓] Total Unique Subdomains Found:${NC} $TOTAL"
-echo -e "${GREEN}[✓] Results Saved To:${NC} output/subdomains.txt"
+
+echo "-----------------------------------------------------------"
+
+check_dependencies
+
+create_output "$OUTPUT_DIR"
+
+run_subfinder "$OUTPUT_DIR" "$DOMAIN"
+
+run_assetfinder "$OUTPUT_DIR" "$DOMAIN"
+
+merge_results "$OUTPUT_DIR"
+
+TOTAL=$(count_subdomains "$OUTPUT_DIR")
+
+run_httpx "$OUTPUT_DIR"
+
+ALIVE=$(count_alive "$OUTPUT_DIR")
+
+END_TIME=$(date +%s)
+
+TIME=$((END_TIME-START_TIME))
+
+printf "[6/6] Generating Summary......... "
+
+generate_summary \
+"$OUTPUT_DIR" \
+"$DOMAIN" \
+"$TOTAL" \
+"$ALIVE" \
+"$TIME"
+
+generate_markdown_report \
+"$OUTPUT_DIR" \
+"$DOMAIN" \
+"$TOTAL" \
+"$ALIVE" \
+"$TIME"
+
+write_log \
+"$DOMAIN" \
+"$TOTAL" \
+"$ALIVE" \
+"$TIME"
+
+echo -e "${GREEN}✓${NC}"
+
 echo ""
 
-echo "=============================================="
-echo "Done!"
-echo "=============================================="
+echo "-----------------------------------------------------------"
+
+echo ""
+
+echo -e "${GREEN}Scan Summary${NC}"
+
+echo ""
+
+echo "Target Domain      : $DOMAIN"
+
+echo "Unique Subdomains  : $TOTAL"
+
+echo "Live Hosts         : $ALIVE"
+
+echo "Execution Time     : ${TIME} seconds"
+
+echo ""
+
+echo "==========================================================="
+
+echo "Completed."
+
+echo "==========================================================="
