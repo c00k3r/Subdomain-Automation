@@ -14,7 +14,6 @@ DOMAIN=$1
 OUTPUT_DIR="output/$DOMAIN"
 
 echo -e "${CYAN}Target          :${NC} $DOMAIN"
-
 echo -e "${CYAN}Output Folder   :${NC} $OUTPUT_DIR"
 
 echo ""
@@ -31,9 +30,24 @@ remove_duplicates "$OUTPUT_DIR"
 
 TOTAL=$(count_subdomains "$OUTPUT_DIR")
 
+run_httpx "$OUTPUT_DIR"
+
+ALIVE=$(count_alive "$OUTPUT_DIR")
+
 END_TIME=$(date +%s)
 
 TIME=$((END_TIME-START_TIME))
+
+printf "[5/5] Generating Summary......... "
+
+generate_summary \
+"$OUTPUT_DIR" \
+"$DOMAIN" \
+"$TOTAL" \
+"$ALIVE" \
+"$TIME"
+
+echo -e "${GREEN}✓${NC}"
 
 echo ""
 
@@ -48,6 +62,8 @@ echo ""
 echo "Target Domain      : $DOMAIN"
 
 echo "Unique Subdomains  : $TOTAL"
+
+echo "Live Hosts         : $ALIVE"
 
 echo "Execution Time     : ${TIME} seconds"
 

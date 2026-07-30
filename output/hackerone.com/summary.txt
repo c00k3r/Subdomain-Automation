@@ -6,14 +6,12 @@ Target Domain : hackerone.com
 
 Unique Subdomains : 24
 
-Execution Time : 17 seconds
+Live Hosts : 0
 
-Results File :
-
-output/hackerone.com/subdomains.txt
+Execution Time : 2 seconds
 
 Generated :
 
-Thu Jul 30 10:50:53 PM IST 2026
+Thu Jul 30 11:03:08 PM IST 2026
 
 ===================================================

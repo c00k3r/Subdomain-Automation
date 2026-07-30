@@ -22,15 +22,24 @@ fi
 
 check_dependencies() {
 
-printf "[1/4] Checking Dependencies... "
+printf "[1/5] Checking Dependencies... "
 
 if ! command -v subfinder >/dev/null 2>&1; then
 
-echo -e "${RED}FAILED${NC}"
+echo -e "${RED}Subfinder Missing${NC}"
+
+exit 1
+
+fi
+
+if ! command -v httpx >/dev/null 2>&1; then
+
+echo -e "${RED}Httpx Missing${NC}"
 
 echo ""
-
-echo "Subfinder is not installed."
+echo "Install with:"
+echo ""
+echo "go install github.com/projectdiscovery/httpx/cmd/httpx@latest"
 
 exit 1
 
@@ -72,5 +81,51 @@ echo -e "${GREEN}✓${NC}"
 count_subdomains() {
 
 wc -l < "$1/subdomains.txt"
+
+}
+run_httpx() {
+
+printf "[4/5] Checking Live Hosts........ "
+
+httpx \
+-silent \
+-l "$1/subdomains.txt" \
+-o "$1/alive.txt" >/dev/null 2>&1
+
+echo -e "${GREEN}✓${NC}"
+
+}
+
+count_alive() {
+
+if [ -f "$1/alive.txt" ]; then
+    wc -l < "$1/alive.txt"
+else
+    echo 0
+fi
+
+}
+
+generate_summary() {
+
+cat << EOF > "$1/summary.txt"
+===================================================
+Passive Subdomain Recon Automation Tool v2
+===================================================
+
+Target Domain : $2
+
+Unique Subdomains : $3
+
+Live Hosts : $4
+
+Execution Time : $5 seconds
+
+Generated :
+
+$(date)
+
+===================================================
+EOF
 
 }
