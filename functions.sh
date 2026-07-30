@@ -6,23 +6,31 @@
 
 validate_input() {
 
-if [ -z "$1" ]; then
+while getopts "d:" opt
+do
+    case $opt in
+        d)
+            DOMAIN="$OPTARG"
+            ;;
+        *)
+            echo "Usage: ./recon.sh -d domain.com"
+            exit 1
+            ;;
+    esac
+done
 
-echo -e "${RED}[!] Usage:${NC} ./recon.sh <domain>"
-
-echo ""
-
-echo "./recon.sh hackerone.com"
-
-exit 1
-
+if [ -z "$DOMAIN" ]; then
+    echo "Usage: ./recon.sh -d domain.com"
+    exit 1
 fi
+
+export DOMAIN
 
 }
 
 check_dependencies() {
 
-printf "[1/5] Checking Dependencies... "
+printf "[1/6] Checking Dependencies... "
 
 if ! command -v subfinder >/dev/null 2>&1; then
 
@@ -32,14 +40,17 @@ exit 1
 
 fi
 
+if ! command -v assetfinder >/dev/null 2>&1; then
+
+echo -e "${RED}Assetfinder Missing${NC}"
+
+exit 1
+
+fi
+
 if ! command -v httpx >/dev/null 2>&1; then
 
 echo -e "${RED}Httpx Missing${NC}"
-
-echo ""
-echo "Install with:"
-echo ""
-echo "go install github.com/projectdiscovery/httpx/cmd/httpx@latest"
 
 exit 1
 
@@ -57,11 +68,24 @@ mkdir -p "$1"
 
 run_subfinder() {
 
-printf "[2/4] Running Subfinder......... "
+printf "[2/6] Running Subfinder......... "
 
 subfinder -d "$2" \
 -silent \
 -o "$1/subdomains.txt"
+
+echo -e "${GREEN}✓${NC}"
+
+}
+
+run_assetfinder() {
+
+printf "[3/6] Running Assetfinder...... "
+
+assetfinder \
+--subs-only \
+"$2" \
+> "$1/assetfinder.txt"
 
 echo -e "${GREEN}✓${NC}"
 
@@ -85,7 +109,7 @@ wc -l < "$1/subdomains.txt"
 }
 run_httpx() {
 
-printf "[4/5] Checking Live Hosts........ "
+printf "[5/6] Checking Live Hosts........ "
 
 httpx \
 -silent \
@@ -191,5 +215,24 @@ Status : SUCCESS
 ==================================================
 
 EOF
+
+}
+
+merge_results() {
+
+printf "[4/6] Merging Results.......... "
+
+cat \
+"$1/subdomains.txt" \
+"$1/assetfinder.txt" \
+2>/dev/null \
+| sort -u \
+> "$1/all_subdomains.txt"
+
+mv \
+"$1/all_subdomains.txt" \
+"$1/subdomains.txt"
+
+echo -e "${GREEN}✓${NC}"
 
 }

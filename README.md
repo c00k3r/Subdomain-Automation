@@ -1,19 +1,32 @@
-# Passive Subdomain Recon Automation
+# ReconForge -- Passive Subdomain Recon Automation Tool
 
-A simple Bash automation script for **passive subdomain enumeration** using **Subfinder**. The script automates the process of discovering subdomains, removing duplicate entries, and saving the results in a structured output directory.
+A modular Bash-based passive reconnaissance tool for bug bounty hunters, penetration testers, and cybersecurity enthusiasts.
 
-> **Disclaimer:** This project is intended for educational purposes and authorized security assessments only. Always obtain proper permission before performing reconnaissance on any target.
+The tool automates passive subdomain enumeration, live host detection, reporting, and logging using ProjectDiscovery tools.
 
 ---
 
 ## Features
 
-* Passive subdomain enumeration using **Subfinder**
-* Automatic output directory creation
-* Duplicate removal
-* Total unique subdomain count
-* Colorized terminal output
-* Beginner-friendly Bash script
+- Passive subdomain enumeration using **Subfinder**
+- Additional enumeration using **Assetfinder**
+- Automatic duplicate removal
+- Live host detection using **Httpx**
+- Markdown report generation
+- Scan summary generation
+- Scan logging
+- Organized output directory structure
+- Modular Bash architecture
+
+---
+
+## Technologies Used
+
+- Bash
+- Subfinder
+- Assetfinder
+- Httpx
+- Linux / WSL
 
 ---
 
@@ -21,129 +34,137 @@ A simple Bash automation script for **passive subdomain enumeration** using **Su
 
 ```text
 subdomain-recon/
-│── recon.sh
-│── README.md
-│── .gitignore
+
+├── config.sh
+├── functions.sh
+├── recon.sh
+├── README.md
+├── LICENSE
+├── logs/
+├── reports/
 └── output/
-    └── .gitkeep
 ```
 
 ---
 
 ## Requirements
 
-* Linux or WSL
-* Bash
-* Go (for installing Subfinder)
-* Subfinder
+Install the required tools:
 
-### Install Subfinder
+### Subfinder
 
 ```bash
-go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 ```
 
-Add Go binaries to your PATH if necessary:
+### Httpx
 
 ```bash
-echo 'export PATH=$PATH:$HOME/go/bin' >> ~/.bashrc
-source ~/.bashrc
+go install github.com/projectdiscovery/httpx/cmd/httpx@latest
 ```
 
-Verify the installation:
+### Assetfinder
 
 ```bash
-subfinder -version
-```
-
----
-
-## Installation
-
-Clone the repository:
-
-```bash
-git clone https://github.com/<your-username>/subdomain-recon.git
-```
-
-Move into the project directory:
-
-```bash
-cd subdomain-recon
-```
-
-Give execution permission to the script:
-
-```bash
-chmod +x recon.sh
+go install github.com/tomnomnom/assetfinder@latest
 ```
 
 ---
 
 ## Usage
 
-Run the script by providing a domain name:
+Run:
 
 ```bash
-./recon.sh example.com
-```
-
----
-
-## Example Output
-
-```text
-==============================================
-      Passive Subdomain Recon Automation
-==============================================
-
-[+] Target: example.com
-[+] Enumerating subdomains...
-
-[✓] Enumeration Completed Successfully!
-[✓] Total Unique Subdomains Found: 53
-[✓] Results Saved To: output/subdomains.txt
-
-==============================================
-Done!
-==============================================
+./recon.sh -d hackerone.com
 ```
 
 ---
 
 ## Output
 
-The discovered subdomains are stored in:
+After a successful scan:
 
 ```text
-output/subdomains.txt
+output/
+└── hackerone.com/
+    ├── subdomains.txt
+    ├── alive.txt
+    └── summary.txt
+```
+
+Reports:
+
+```text
+reports/
+└── hackerone.com/
+    └── report.md
+```
+
+Logs:
+
+```text
+logs/
+└── recon.log
 ```
 
 ---
 
-## Technologies Used
+## Example Workflow
 
-* Bash
-* Subfinder
-* Linux / WSL
+```
+Target Domain
+      │
+      ▼
+ Subfinder
+      │
+      ▼
+ Assetfinder
+      │
+      ▼
+ Merge Results
+      │
+      ▼
+ Remove Duplicates
+      │
+      ▼
+ Httpx
+      │
+      ▼
+ Reports + Logs
+```
 
 ---
 
-## Future Improvements
+## Current Features
 
-* Live host detection
-* HTTP status checking
-* DNS resolution
-* Screenshot automation
-* JSON and CSV output support
-* Logging
-* Automatic report generation
+- [x] Passive Enumeration
+- [x] Multi-tool Enumeration
+- [x] Live Host Detection
+- [x] Markdown Reports
+- [x] Summary Reports
+- [x] Scan Logging
+- [x] Modular Architecture
+
+---
+
+## Roadmap
+
+- [ ] Amass Integration
+- [ ] DNS Resolution
+- [ ] Port Scanning
+- [ ] Technology Detection
+- [ ] Screenshot Capture
+- [ ] Wayback URL Collection
+- [ ] JSON Export
+- [ ] Parallel Execution
+- [ ] Docker Support
 
 ---
 
 ## License
 
-This project is licensed under the MIT License.
+MIT License
 
 ---
 
@@ -151,4 +172,4 @@ This project is licensed under the MIT License.
 
 **Mrityunjay**
 
-Cybersecurity Enthusiast | VAPT Intern | B.Tech CSE Student
+Cybersecurity Student | VAPT Enthusiast

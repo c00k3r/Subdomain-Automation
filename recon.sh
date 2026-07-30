@@ -7,9 +7,7 @@ START_TIME=$(date +%s)
 
 show_banner
 
-validate_input "$1"
-
-DOMAIN=$1
+validate_input "$@"
 
 OUTPUT_DIR="output/$DOMAIN"
 
@@ -26,7 +24,9 @@ create_output "$OUTPUT_DIR"
 
 run_subfinder "$OUTPUT_DIR" "$DOMAIN"
 
-remove_duplicates "$OUTPUT_DIR"
+run_assetfinder "$OUTPUT_DIR" "$DOMAIN"
+
+merge_results "$OUTPUT_DIR"
 
 TOTAL=$(count_subdomains "$OUTPUT_DIR")
 
@@ -38,7 +38,7 @@ END_TIME=$(date +%s)
 
 TIME=$((END_TIME-START_TIME))
 
-printf "[5/5] Generating Summary......... "
+printf "[6/6] Generating Summary......... "
 
 generate_summary \
 "$OUTPUT_DIR" \
