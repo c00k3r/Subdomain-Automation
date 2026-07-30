@@ -47,6 +47,19 @@ generate_summary \
 "$ALIVE" \
 "$TIME"
 
+generate_markdown_report \
+"$OUTPUT_DIR" \
+"$DOMAIN" \
+"$TOTAL" \
+"$ALIVE" \
+"$TIME"
+
+write_log \
+"$DOMAIN" \
+"$TOTAL" \
+"$ALIVE" \
+"$TIME"
+
 echo -e "${GREEN}✓${NC}"
 
 echo ""

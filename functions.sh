@@ -129,3 +129,67 @@ $(date)
 EOF
 
 }
+
+generate_markdown_report() {
+
+REPORT_DIR="reports/$2"
+
+mkdir -p "$REPORT_DIR"
+
+cat << EOF > "$REPORT_DIR/report.md"
+# Passive Subdomain Recon Report
+
+## Target
+
+$2
+
+---
+
+## Scan Statistics
+
+| Item | Value |
+|------|-------|
+| Total Subdomains | $3 |
+| Live Hosts | $4 |
+| Execution Time | $5 seconds |
+
+---
+
+## Output Files
+
+- output/$2/subdomains.txt
+- output/$2/alive.txt
+- output/$2/summary.txt
+
+---
+
+Generated:
+
+$(date)
+EOF
+
+}
+
+write_log() {
+
+cat << EOF >> logs/recon.log
+
+==================================================
+
+$(date)
+
+Target : $1
+
+Subdomains : $2
+
+Alive Hosts : $3
+
+Execution Time : $4 seconds
+
+Status : SUCCESS
+
+==================================================
+
+EOF
+
+}
