@@ -162,6 +162,12 @@ Target Domain
 
 ---
 
+## Disclaimer
+
+This tool is intended only for passive reconnaissance against domains and systems you own or are explicitly authorized to test (e.g. in-scope bug bounty targets). Do not use it against assets without permission.
+
+---
+
 ## License
 
 MIT License
