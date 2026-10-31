@@ -12,9 +12,27 @@ export default function App() {
 
   const [activeScan, setActiveScan] = useState(null);
   const [scansList, setScansList] = useState([]);
+  const [sessionToken, setSessionToken] = useState('');
 
   const eventSourceRef = useRef(null);
   const pollTimerRef = useRef(null);
+
+  // Fetch cryptographic session token
+  const fetchSessionToken = async () => {
+    try {
+      const res = await fetch('/api/session');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.token) {
+          setSessionToken(data.token);
+          return data.token;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return '';
+  };
 
   // Fetch scan history
   const fetchHistory = async () => {
@@ -50,6 +68,7 @@ export default function App() {
   };
 
   useEffect(() => {
+    fetchSessionToken();
     fetchHistory();
     return () => {
       if (eventSourceRef.current) eventSourceRef.current.close();
@@ -134,10 +153,18 @@ export default function App() {
     setCurrentView('scanning');
 
     try {
+      let token = sessionToken;
+      if (!token) {
+        token = await fetchSessionToken();
+      }
+
       const res = await fetch('/api/recon/start', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain }),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-reconforge-session': token || '',
+        },
+        body: JSON.stringify({ domain, sessionToken: token }),
       });
 
       if (!res.ok) {

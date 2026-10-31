@@ -17,9 +17,7 @@ export const RiskScanner = ({ scan }) => {
 
   // Identify potential takeovers
   const takeoverTargets = aliveHosts.filter((h) => h.takeoverRisk && h.takeoverRisk.isVulnerable);
-
-  // If no live host returned explicit takeover, let's also scan all 404s or dangling CNAME candidates
-  const fallbackTakeovers = aliveHosts.filter((h) => h.statusCode === 404 || h.statusCode === 0);
+  const internalLeakTargets = aliveHosts.filter((h) => h.internalLeak || h.ssrfBlocked || h.category === 'internal-leak');
 
   const handleCopy = (text, key) => {
     navigator.clipboard.writeText(text);
@@ -40,7 +38,19 @@ export const RiskScanner = ({ scan }) => {
           }`}
         >
           <ShieldAlert className="w-4 h-4 text-amber-400" />
-          <span>Subdomain Takeover ({takeoverTargets.length || fallbackTakeovers.length})</span>
+          <span>Subdomain Takeover ({takeoverTargets.length})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('leaks')}
+          className={`px-3 py-2 rounded-xl flex items-center space-x-2 transition-all ${
+            activeTab === 'leaks'
+              ? 'bg-red-500/20 text-red-300 border border-red-500/40 font-semibold shadow-sm'
+              : 'text-slate-400 hover:text-white hover:bg-[#0e1017]'
+          }`}
+        >
+          <AlertTriangle className="w-4 h-4 text-red-400" />
+          <span>Internal IP Leaks ({internalLeakTargets.length})</span>
         </button>
 
         <button
@@ -92,11 +102,11 @@ export const RiskScanner = ({ scan }) => {
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center space-x-2">
                     <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono bg-rose-500/20 text-rose-400 border border-rose-500/30">
-                      {target.takeoverRisk.severity || 'CRITICAL'}
+                      {target.takeoverRisk.severity || 'HIGH'}
                     </span>
                     <span className="text-xs font-mono font-semibold text-amber-300 flex items-center space-x-1">
                       <AlertTriangle className="w-3.5 h-3.5" />
-                      <span>Potential Subdomain Takeover Detected</span>
+                      <span>{target.takeoverRisk.certainty === 'Likely' ? 'Likely Subdomain Takeover' : 'Potential Signature Match'}</span>
                     </span>
                   </div>
 
@@ -110,6 +120,11 @@ export const RiskScanner = ({ scan }) => {
                     <span>{target.subdomain}</span>
                     <span className="text-xs font-normal text-rose-400 font-mono">(HTTP {target.statusCode})</span>
                   </div>
+                  {target.takeoverRisk.cname && (
+                    <div className="text-xs font-mono text-amber-200/80">
+                      CNAME Target: <span className="text-white">{target.takeoverRisk.cname}</span>
+                    </div>
+                  )}
                   <p className="text-xs text-slate-300 leading-relaxed">
                     {target.takeoverRisk.reason}
                   </p>
@@ -141,28 +156,81 @@ export const RiskScanner = ({ scan }) => {
                 </div>
               </div>
             ))
-          ) : fallbackTakeovers.length > 0 ? (
-            <div className="p-6 rounded-2xl bg-[#161822] border border-[#262b3b] space-y-4">
-              <div className="flex items-center space-x-2 text-xs font-semibold text-emerald-400">
-                <ShieldCheck className="w-4 h-4" />
-                <span>Zero Known Dangling Cloud Signatures Found</span>
-              </div>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                No active subdomains matched high-risk signatures (AWS S3, GitHub Pages, Heroku 404s).
-                The following {fallbackTakeovers.length} hosts returned non-200 status codes for manual auditing:
-              </p>
-              <div className="space-y-2">
-                {fallbackTakeovers.slice(0, 5).map((h, i) => (
-                  <div key={i} className="p-2.5 rounded-xl bg-[#0e1017] border border-[#232733] flex items-center justify-between text-xs font-mono">
-                    <span className="text-white">{h.subdomain}</span>
-                    <span className="text-amber-400 font-bold">Status: {h.statusCode || 'DNS only'}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
           ) : (
-            <div className="p-10 text-center text-slate-500 bg-[#161822] border border-[#262b3b] rounded-2xl text-xs font-mono">
-              // All audited live hosts returned healthy 2xx/3xx response codes.
+            <div className="p-8 rounded-2xl bg-[#161822] border border-[#262b3b] space-y-2 text-center">
+              <div className="flex items-center justify-center space-x-2 text-xs font-semibold text-emerald-400 font-mono">
+                <ShieldCheck className="w-4 h-4" />
+                <span>Zero Dangling CNAME Takeover Risks Detected</span>
+              </div>
+              <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
+                All resolved CNAME records point to active resources or internal endpoints. No unclaimed third-party cloud provider targets (GitHub Pages, AWS S3, Heroku) were discovered.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB 2: Internal IP Leaks (SSRF / RFC 1918) */}
+      {activeTab === 'leaks' && (
+        <div className="space-y-3">
+          {internalLeakTargets.length > 0 ? (
+            internalLeakTargets.map((target, idx) => (
+              <div
+                key={idx}
+                className="p-5 rounded-2xl bg-[#161822] border-2 border-red-500/40 shadow-xl space-y-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center space-x-2">
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono bg-red-500/20 text-red-400 border border-red-500/30">
+                      MEDIUM
+                    </span>
+                    <span className="text-xs font-mono font-semibold text-red-300 flex items-center space-x-1">
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                      <span>Internal IP Leak / RFC 1918 Exposure</span>
+                    </span>
+                  </div>
+                  <span className="text-xs font-mono text-slate-400">
+                    Target IP: <strong className="text-red-400">{target.ip}</strong>
+                  </span>
+                </div>
+
+                <div className="space-y-1">
+                  <div className="text-base font-bold font-mono text-white flex items-center space-x-2">
+                    <span>{target.subdomain}</span>
+                  </div>
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    Public DNS zone resolves this hostname to a reserved RFC 1918, loopback, or internal address.
+                    This leaks internal network topology and may indicate a split-horizon DNS misconfiguration. Outbound probing was aborted before TCP socket establishment to prevent SSRF.
+                  </p>
+                </div>
+
+                <div className="p-3 rounded-xl bg-[#0e1017] border border-[#232733] text-xs text-slate-400 space-y-1">
+                  <strong className="text-slate-200">Remediation:</strong>
+                  <p className="text-[11px] text-slate-400">
+                    Remove public DNS records pointing to internal/private IP space. Isolate internal hostnames to internal split-horizon DNS resolvers.
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-between pt-1 text-xs">
+                  <button
+                    onClick={() => handleCopy(`dig +short ${target.subdomain}`, `leak_${idx}`)}
+                    className="px-3 py-1.5 rounded-lg bg-[#0e1017] hover:bg-slate-800 text-slate-300 border border-[#262b3b] font-mono text-xs flex items-center space-x-1.5"
+                  >
+                    {copiedKey === `leak_${idx}` ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedKey === `leak_${idx}` ? 'dig PoC Copied' : 'Copy dig PoC'}</span>
+                  </button>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="p-8 rounded-2xl bg-[#161822] border border-[#262b3b] space-y-2 text-center">
+              <div className="flex items-center justify-center space-x-2 text-xs font-semibold text-emerald-400 font-mono">
+                <ShieldCheck className="w-4 h-4" />
+                <span>Zero Internal RFC 1918 DNS Leaks Detected</span>
+              </div>
+              <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
+                All resolved public DNS records point to legitimate public IP addresses. No private subnets, loopbacks, or cloud metadata endpoints were exposed.
+              </p>
             </div>
           )}
         </div>

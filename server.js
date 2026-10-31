@@ -12,48 +12,57 @@ import { performance } from 'node:perf_hooks';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const BIND_HOST = process.env.HOST || '0.0.0.0';
+// Default to 127.0.0.1 for local desktop security; allow 0.0.0.0 only when explicitly configured or in containerized runtimes
+const BIND_HOST = process.env.HOST || (process.env.K_SERVICE ? '0.0.0.0' : '127.0.0.1');
 const isProd = process.env.NODE_ENV === 'production';
 
-// Strict CORS Origin Policy: Permits local addresses, Cloud Run preview domains (*.run.app),
-// Google AI Studio infrastructure, and web container environments.
+// Inbound DNS Rebinding Defense: Strictly validate Host headers on local & preview interfaces
+const ALLOWED_HOSTS = new Set([
+  'localhost',
+  'localhost:3000',
+  'localhost:5173',
+  '127.0.0.1',
+  '127.0.0.1:3000',
+  '127.0.0.1:5173',
+  'ais-dev-sihmny3awbbh2y7w73gwjj-981974432220.asia-southeast1.run.app',
+  'ais-pre-sihmny3awbbh2y7w73gwjj-981974432220.asia-southeast1.run.app',
+]);
+
+const envHosts = (process.env.ALLOWED_HOSTS || '')
+  .split(',')
+  .map(h => h.trim().toLowerCase())
+  .filter(Boolean);
+for (const h of envHosts) ALLOWED_HOSTS.add(h);
+
+export function isValidHostHeader(hostHeader) {
+  if (!hostHeader || typeof hostHeader !== 'string') return false;
+  const clean = hostHeader.trim().toLowerCase();
+  const hostWithoutPort = clean.split(':')[0];
+  return ALLOWED_HOSTS.has(clean) || ALLOWED_HOSTS.has(hostWithoutPort);
+}
+
+// Strict CORS Policy: Exact match against ALLOWED_ORIGINS and authorized local/preview endpoints
+// Drop credentials: true since ReconForge does not use session cookies
+const DEFAULT_ALLOWED_ORIGINS = new Set([
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'https://ais-dev-sihmny3awbbh2y7w73gwjj-981974432220.asia-southeast1.run.app',
+  'https://ais-pre-sihmny3awbbh2y7w73gwjj-981974432220.asia-southeast1.run.app',
+]);
+
+const envOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(o => o.trim().toLowerCase().replace(/\/+$/, ''))
+  .filter(Boolean);
+for (const o of envOrigins) DEFAULT_ALLOWED_ORIGINS.add(o);
+
 export function isAllowedOrigin(origin) {
   // Allow non-browser requests (CLI, curl, server-to-server)
   if (!origin) return true;
-
-  try {
-    const url = new URL(origin);
-    const host = url.hostname.toLowerCase();
-
-    // 1. Localhost and loopback bindings (any port)
-    if (
-      host === 'localhost' ||
-      host === '127.0.0.1' ||
-      host === '0.0.0.0' ||
-      host.endsWith('.localhost')
-    ) {
-      return true;
-    }
-
-    // 2. Google Cloud Run preview and deployment domains (*.run.app)
-    if (host === 'run.app' || host.endsWith('.run.app')) {
-      return true;
-    }
-
-    // 3. Google AI Studio, Google infrastructure, and web containers
-    if (
-      host.endsWith('.google.com') ||
-      host.endsWith('.googleusercontent.com') ||
-      host.endsWith('.webcontainer.io') ||
-      host.includes('aistudio')
-    ) {
-      return true;
-    }
-
-    return false;
-  } catch {
-    return false;
-  }
+  const clean = String(origin).trim().toLowerCase().replace(/\/+$/, '');
+  return DEFAULT_ALLOWED_ORIGINS.has(clean);
 }
 
 app.use(cors({
@@ -61,14 +70,31 @@ app.use(cors({
     if (isAllowedOrigin(origin)) {
       callback(null, true);
     } else {
-      // Per CORS spec: withhold allow headers without crashing Express middleware
       callback(null, false);
     }
   },
-  credentials: true,
+  credentials: false, // Explicitly false
 }));
 
 app.use(express.json());
+
+// Inbound DNS Rebinding Protection Middleware: Validates Host header on all /api routes
+app.use('/api', (req, res, next) => {
+  const host = req.headers.host;
+  if (!isValidHostHeader(host)) {
+    return res.status(403).json({
+      error: 'Forbidden: Invalid Host header (Inbound DNS Rebinding protection)',
+    });
+  }
+  next();
+});
+
+// Cryptographically random per-session token to defeat Cross-Origin Scanner Hijacking
+export const SESSION_TOKEN = crypto.randomBytes(24).toString('hex');
+
+app.get('/api/session', (_req, res) => {
+  res.json({ token: SESSION_TOKEN });
+});
 
 // In-memory store for active and past user scans with LRU/bounded eviction
 const MAX_SCANS = 30;
@@ -164,38 +190,101 @@ ipBlockList.addSubnet('fe80::', 10, 'ipv6');
 // IPv6 Multicast (ff00::/8)
 ipBlockList.addSubnet('ff00::', 8, 'ipv6');
 
-// Evaluates an IP against RFC ranges with normalization for IPv4-mapped IPv6
-export function isPrivateOrReservedIp(ip) {
-  if (!ip || typeof ip !== 'string') return false;
-  const clean = ip.trim().toLowerCase();
-
-  // Normalize IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1 or ::ffff:7f00:0001)
-  if (clean.startsWith('::ffff:')) {
-    const after = clean.slice(7);
-    if (net.isIP(after) === 4) {
-      return ipBlockList.check(after, 'ipv4');
-    }
-    const hexParts = after.split(':');
-    if (hexParts.length === 2 && hexParts.every(p => /^[0-9a-f]{1,4}$/i.test(p))) {
-      const num1 = parseInt(hexParts[0], 16);
-      const num2 = parseInt(hexParts[1], 16);
-      const b0 = (num1 >> 8) & 0xff;
-      const b1 = num1 & 0xff;
-      const b2 = (num2 >> 8) & 0xff;
-      const b3 = num2 & 0xff;
-      const v4 = `${b0}.${b1}.${b2}.${b3}`;
-      return ipBlockList.check(v4, 'ipv4');
+// Helper: Expands an IPv6 address into 8 16-bit integer words
+export function expandIPv6ToWords(ipStr) {
+  let str = String(ipStr || '').toLowerCase();
+  const lastColon = str.lastIndexOf(':');
+  if (lastColon !== -1) {
+    const tail = str.slice(lastColon + 1);
+    if (tail.includes('.')) {
+      const parts = tail.split('.');
+      if (parts.length === 4 && parts.every(p => /^\d+$/.test(p))) {
+        const b0 = parseInt(parts[0], 10);
+        const b1 = parseInt(parts[1], 10);
+        const b2 = parseInt(parts[2], 10);
+        const b3 = parseInt(parts[3], 10);
+        if (b0 <= 255 && b1 <= 255 && b2 <= 255 && b3 <= 255) {
+          const hex1 = ((b0 << 8) | b1).toString(16);
+          const hex2 = ((b2 << 8) | b3).toString(16);
+          str = str.slice(0, lastColon + 1) + hex1 + ':' + hex2;
+        }
+      }
     }
   }
 
+  const halves = str.split('::');
+  if (halves.length > 2) return null;
+  let words = [];
+  if (halves.length === 2) {
+    const left = halves[0] ? halves[0].split(':').filter(Boolean).map(x => parseInt(x, 16)) : [];
+    const right = halves[1] ? halves[1].split(':').filter(Boolean).map(x => parseInt(x, 16)) : [];
+    const fillCount = 8 - (left.length + right.length);
+    if (fillCount < 0) return null;
+    const middle = new Array(fillCount).fill(0);
+    words = [...left, ...middle, ...right];
+  } else {
+    words = str.split(':').map(x => parseInt(x, 16));
+  }
+  if (words.length !== 8 || words.some(w => isNaN(w) || w < 0 || w > 0xffff)) {
+    return null;
+  }
+  return words;
+}
+
+// Evaluates an IP against RFC ranges.
+// CRITICAL: FAILS CLOSED. Any unparseable string, garbage, null, or invalid IP returns true (blocked).
+export function isPrivateOrReservedIp(ip) {
+  if (!ip || typeof ip !== 'string') return true; // Fail closed
+  const clean = ip.trim().toLowerCase();
+
   const ver = net.isIP(clean);
+  if (ver === 0) {
+    // Fail closed: malformed or unparseable IP input is rejected
+    return true;
+  }
+
   if (ver === 4) {
     return ipBlockList.check(clean, 'ipv4');
-  } else if (ver === 6) {
+  }
+
+  if (ver === 6) {
+    const words = expandIPv6ToWords(clean);
+    if (!words) {
+      return true; // Fail closed
+    }
+
+    // 1. IPv4-Mapped IPv6 (::ffff:0:0/96)
+    if (words[0] === 0 && words[1] === 0 && words[2] === 0 && words[3] === 0 && words[4] === 0 && words[5] === 0xffff) {
+      const v4 = `${words[6] >> 8}.${words[6] & 0xff}.${words[7] >> 8}.${words[7] & 0xff}`;
+      return ipBlockList.check(v4, 'ipv4');
+    }
+
+    // 2. IPv4-Compatible IPv6 (::0:0/96) - RFC 4291
+    if (words[0] === 0 && words[1] === 0 && words[2] === 0 && words[3] === 0 && words[4] === 0 && words[5] === 0) {
+      if (words[6] === 0 && words[7] === 0) return true; // :: unspecified
+      if (words[6] === 0 && words[7] === 1) return true; // ::1 loopback
+      const v4 = `${words[6] >> 8}.${words[6] & 0xff}.${words[7] >> 8}.${words[7] & 0xff}`;
+      return ipBlockList.check(v4, 'ipv4');
+    }
+
+    // 3. NAT64 Well-Known Prefix (64:ff9b::/96) - RFC 6052
+    if (words[0] === 0x0064 && words[1] === 0xff9b && words[2] === 0 && words[3] === 0 && words[4] === 0 && words[5] === 0) {
+      const v4 = `${words[6] >> 8}.${words[6] & 0xff}.${words[7] >> 8}.${words[7] & 0xff}`;
+      return ipBlockList.check(v4, 'ipv4');
+    }
+
+    // 4. 6to4 Anycast / Encapsulation (2002::/16) - RFC 3056
+    // Bits 16..47 encode the embedded IPv4 address (words[1] and words[2])
+    if (words[0] === 0x2002) {
+      const v4 = `${words[1] >> 8}.${words[1] & 0xff}.${words[2] >> 8}.${words[2] & 0xff}`;
+      return ipBlockList.check(v4, 'ipv4');
+    }
+
+    // 5. Standard IPv6 BlockList (::1, ::, fc00::/7 ULA, fe80::/10 link-local, ff00::/8 multicast)
     return ipBlockList.check(clean, 'ipv6');
   }
 
-  return false;
+  return true; // Fail closed
 }
 
 // Custom connect-time lookup: closes TOCTOU check-then-use DNS rebinding gap
@@ -246,6 +335,15 @@ export function safeHttpRequest(targetUrl, {
 
     const isHttps = parsedUrl.protocol === 'https:';
     const client = isHttps ? https : http;
+
+    // Defense against direct IP literals: Node's http.request skips lookup when host is an IP literal.
+    // Ensure IP literals are validated and blocked immediately before connection.
+    const hostname = parsedUrl.hostname;
+    if (net.isIP(hostname) && isPrivateOrReservedIp(hostname)) {
+      const ssrfError = new Error(`SSRF blocked: IP literal ${hostname} is a reserved address`);
+      ssrfError.code = 'ERR_SSRF_BLOCKED';
+      return reject(ssrfError);
+    }
 
     let finished = false;
     let deadlineTimer = null;
@@ -412,19 +510,39 @@ async function queryHackerTarget(domain) {
   }
 }
 
-// 4. Wildcard DNS Pre-Check: Probes a random non-existent subdomain to prevent false positive bursts
-export async function detectWildcardDNS(domain, resolverFn = dns.resolve4) {
+// 4. Wildcard DNS Pre-Check: Probes random canary labels on both IPv4 and IPv6 to catch v4/v6 wildcards
+export async function detectWildcardDNS(
+  domain,
+  resolver4Fn = dns.resolve4,
+  resolver6Fn = dns.resolve6
+) {
   const randomSuffix = crypto.randomBytes(4).toString('hex');
-  const testHost = `_wildcard_check_${randomSuffix}.${domain}`;
+  const testHost4 = `_wildcard_v4_${randomSuffix}.${domain}`;
+  const testHost6 = `_wildcard_v6_${randomSuffix}.${domain}`;
+  const wildcardIps = [];
+
   try {
-    const ips = await resolverFn(testHost);
-    if (ips && ips.length > 0) {
-      return { hasWildcard: true, wildcardIps: ips };
+    const ips4 = await resolver4Fn(testHost4);
+    if (Array.isArray(ips4) && ips4.length > 0) {
+      wildcardIps.push(...ips4);
     }
   } catch {
     // Expected behavior: NXDOMAIN / ENOTFOUND
   }
-  return { hasWildcard: false, wildcardIps: [] };
+
+  try {
+    const ips6 = await resolver6Fn(testHost6);
+    if (Array.isArray(ips6) && ips6.length > 0) {
+      wildcardIps.push(...ips6);
+    }
+  } catch {
+    // Expected behavior: NXDOMAIN / ENOTFOUND
+  }
+
+  return {
+    hasWildcard: wildcardIps.length > 0,
+    wildcardIps: Array.from(new Set(wildcardIps)),
+  };
 }
 
 // 5. Active DNS dictionary checking for high-frequency prefixes (only run if NO wildcard DNS)
@@ -569,9 +687,14 @@ const TAKEOVER_SERVICES = [
   },
 ];
 
-export async function checkTakeoverRisk(subdomain, statusCode, body = '', cnameResolverFn = dns.resolveCname) {
-  if (statusCode !== 404 && statusCode !== 0) return null;
-  const b = body.toLowerCase();
+export async function checkTakeoverRisk(
+  subdomain,
+  statusCode,
+  body = '',
+  cnameResolverFn = dns.resolveCname,
+  targetResolverFn = dns.resolve4
+) {
+  const b = (body || '').toLowerCase();
 
   let cnames = [];
   try {
@@ -580,31 +703,69 @@ export async function checkTakeoverRisk(subdomain, statusCode, body = '', cnameR
     // No CNAME record present
   }
 
-  const primaryCname = (cnames[0] || '').toLowerCase();
+  const normalizedCnames = (Array.isArray(cnames) ? cnames : [])
+    .map(c => String(c || '').toLowerCase().replace(/\.$/, ''))
+    .filter(Boolean);
+
+  // If no CNAME resolved and body is empty, no takeover vulnerability exists
+  if (normalizedCnames.length === 0 && b.length === 0) {
+    return null;
+  }
 
   for (const item of TAKEOVER_SERVICES) {
-    const bodyMatches = item.fingerprints.some(fp => b.includes(fp));
-    const cnameMatches = primaryCname && item.cnameSuffixes.some(suffix => primaryCname.endsWith(suffix) || primaryCname.includes(suffix));
+    // Match suffix against any CNAME in the chain using strict endsWith or exact match
+    const matchingCname = normalizedCnames.find(cname =>
+      item.cnameSuffixes.some(suffix => {
+        const cleanSuffix = suffix.toLowerCase().replace(/^\./, '');
+        return cname === cleanSuffix || cname.endsWith(`.${cleanSuffix}`);
+      })
+    );
 
-    if (bodyMatches && cnameMatches) {
+    const bodyMatches = b.length > 0 && item.fingerprints.some(fp => b.includes(fp));
+
+    if (matchingCname) {
+      // Check the most reliable dangling signal: CNAME target produces NXDOMAIN
+      let targetNxDomain = false;
+      try {
+        await targetResolverFn(matchingCname);
+      } catch (err) {
+        if (err && (err.code === 'ENOTFOUND' || err.code === 'NODATA' || err.code === 'ESERVFAIL')) {
+          targetNxDomain = true;
+        }
+      }
+
+      if (targetNxDomain) {
+        return {
+          isVulnerable: true,
+          certainty: 'Likely',
+          service: item.service,
+          cname: matchingCname,
+          severity: item.severity,
+          reason: `Dangling CNAME points to NXDOMAIN target (${matchingCname}). Target resource does not exist in DNS and is susceptible to registration hijack.`,
+          remediation: `Remove the dangling CNAME record for ${subdomain} or register the target resource with ${item.service}.`,
+        };
+      }
+
+      if (bodyMatches && (statusCode === 404 || statusCode === 0 || statusCode === 502 || statusCode === 503)) {
+        return {
+          isVulnerable: true,
+          certainty: 'Likely',
+          service: item.service,
+          cname: matchingCname,
+          severity: item.severity,
+          reason: `CNAME points to ${item.service} (${matchingCname}) and HTTP response matched unclaimed provider fingerprint.`,
+          remediation: `Verify project ownership on ${item.service}. If abandoned, delete the CNAME DNS record.`,
+        };
+      }
+    } else if (bodyMatches && statusCode === 404) {
       return {
         isVulnerable: true,
-        isConfirmed: true,
-        service: item.service,
-        cname: primaryCname,
-        severity: item.severity,
-        reason: `Dangling CNAME (${primaryCname}) points to unclaimed ${item.service} resource.`,
-        remediation: item.remediation,
-      };
-    } else if (bodyMatches) {
-      return {
-        isVulnerable: true,
-        isConfirmed: false,
-        service: `${item.service} (Possible)`,
-        cname: primaryCname || 'None resolved',
+        certainty: 'Potential',
+        service: `${item.service} (Potential)`,
+        cname: normalizedCnames[0] || 'None',
         severity: 'LOW',
-        reason: `HTTP response contains ${item.service} error string, but CNAME record is unconfirmed or not pointing to provider.`,
-        remediation: 'Verify whether a DNS record or routing rule points to this service.',
+        reason: `HTTP response matched ${item.service} signature, but CNAME does not point to known provider suffix.`,
+        remediation: `Inspect DNS and reverse proxy configuration for accidental leak or misconfigured routing.`,
       };
     }
   }
@@ -638,20 +799,21 @@ async function probeLiveHost(subdomain) {
   const primaryIp = ip4 || ip6;
   const category = categorizeSubdomain(subdomain);
 
-  // SSRF Pre-check (also validated at socket connect time via ssrfSafeLookup)
+  // SSRF Pre-check: Internal IPs showing up in public DNS are reportable findings (RFC 1918 exposure)
   if (primaryIp && isPrivateOrReservedIp(primaryIp)) {
     return {
       url: `http://${subdomain}`,
       subdomain,
       statusCode: 0,
-      title: '',
+      title: 'Internal IP / RFC 1918 Exposure',
       latencyMs: dnsTime,
       ip: primaryIp,
       ipv6: ip6,
-      category,
+      category: 'internal-leak',
       techStack: ['Internal IP (SSRF Blocked)'],
       takeoverRisk: null,
       ssrfBlocked: true,
+      internalLeak: true,
     };
   }
 
@@ -698,14 +860,15 @@ async function probeLiveHost(subdomain) {
           url: targetUrl,
           subdomain,
           statusCode: 0,
-          title: '',
+          title: 'Internal IP / RFC 1918 Exposure',
           latencyMs: 0,
           ip: primaryIp,
           ipv6: ip6,
-          category,
+          category: 'internal-leak',
           techStack: ['Internal IP (SSRF Blocked via Rebinding Protection)'],
           takeoverRisk: null,
           ssrfBlocked: true,
+          internalLeak: true,
         };
       }
       // try next protocol
@@ -714,6 +877,7 @@ async function probeLiveHost(subdomain) {
 
   // If DNS resolved but HTTP ports are unreachable
   if (primaryIp) {
+    // Only check takeover if CNAME points to a known service whose target returns NXDOMAIN
     const takeoverRisk = await checkTakeoverRisk(subdomain, 0, '');
     return {
       url: `http://${subdomain}`,
@@ -791,7 +955,8 @@ async function executeReconWorkflow(scan) {
 
   if (wildcardCheck.hasWildcard) {
     appendLog(scan, `      \x1b[33m[Notice] Wildcard DNS active (*.${domain} -> ${wildcardCheck.wildcardIps.join(', ')})\x1b[0m`);
-    appendLog(scan, `      Dictionary guessing bypassed; passive hits matching wildcard IPs will be filtered.`);
+    appendLog(scan, `      Dictionary guessing bypassed to eliminate false-positive floods.`);
+    appendLog(scan, `      Preserving all verified passive records (historical CT logs & OSINT feeds).`);
   } else {
     dictionaryRecords = await resolveCommonSubdomains(domain);
     if (dictionaryRecords.length > 0) {
@@ -804,44 +969,15 @@ async function executeReconWorkflow(scan) {
   scan.currentAction = 'Deduplicating & Normalizing Attack Surface';
   appendLog(scan, `[4/6] Deduplicating & Normalizing Target List... `);
 
-  const rawList = Array.from(new Set([
+  // Passive records from crt.sh, AlienVault OTX, and HackerTarget represent cryptographic or observable evidence.
+  // We keep all passive records even if their current IP equals the wildcard IP, discarding only speculative dictionary guesses.
+  const combined = Array.from(new Set([
     domain,
     ...crtResult.records,
     ...otxResult.records,
     ...htResult.records,
     ...dictionaryRecords,
   ])).sort();
-
-  // If wildcard active, filter passive records that resolve exclusively to wildcard IPs
-  let combined = rawList;
-  if (wildcardCheck.hasWildcard && wildcardIpsSet.size > 0) {
-    const filtered = [];
-    let wildcardFilteredCount = 0;
-    for (let i = 0; i < rawList.length; i += 8) {
-      const slice = rawList.slice(i, i + 8);
-      await Promise.all(slice.map(async (host) => {
-        if (host === domain) {
-          filtered.push(host);
-          return;
-        }
-        try {
-          const ips = await dns.resolve4(host);
-          const isWildcardHit = ips.length > 0 && ips.every(ip => wildcardIpsSet.has(ip));
-          if (!isWildcardHit) {
-            filtered.push(host);
-          } else {
-            wildcardFilteredCount++;
-          }
-        } catch {
-          filtered.push(host);
-        }
-      }));
-    }
-    combined = filtered.sort();
-    if (wildcardFilteredCount > 0) {
-      appendLog(scan, `      Filtered ${wildcardFilteredCount} passive records matching wildcard IPs.`);
-    }
-  }
 
   scan.subdomains = combined;
   scan.totalSubdomains = combined.length;
@@ -860,8 +996,8 @@ async function executeReconWorkflow(scan) {
     for (const r of results) {
       if (r) {
         aliveList.push(r);
-        const logLine = r.ssrfBlocked
-          ? `      [SSRF BLOCKED] ${r.subdomain} (Points to private IP: ${r.ip})`
+        const logLine = r.internalLeak || r.ssrfBlocked
+          ? `      [INTERNAL IP LEAK / SSRF BLOCKED] ${r.subdomain} (Resolves to private IP: ${r.ip})`
           : `      [ALIVE] ${r.url} [Status: ${r.statusCode || 'DNS'}] [${r.latencyMs}ms] ${r.title ? `"${r.title}"` : ''}`;
         appendLog(scan, logLine);
       }
@@ -1007,6 +1143,14 @@ Status          : SUCCESS
 
 // API Routes
 app.post('/api/recon/start', async (req, res) => {
+  // Session token validation prevents Cross-Origin Scanner Hijacking
+  const clientToken = req.headers['x-reconforge-session'] || req.body?.sessionToken || req.query?.token;
+  if (!clientToken || clientToken !== SESSION_TOKEN) {
+    return res.status(403).json({
+      error: 'Forbidden: Missing or invalid session token. Scanner hijacking protection active.',
+    });
+  }
+
   const rawDomain = req.body?.domain;
   if (!rawDomain) {
     return res.status(400).json({ error: 'Target domain is required (e.g. example.com)' });

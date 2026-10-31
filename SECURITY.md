@@ -1,25 +1,31 @@
 # Security Policy & Threat Model
 
-ReconForge is an automated subdomain reconnaissance and active service probing engine designed for authorized penetration testing, bug bounty hunting, and attack surface management. Because network scanners actively probe target infrastructure, they inherently touch sensitive network boundaries and must defend against weaponized DNS responses, SSRF (Server-Side Request Forgery), DNS rebinding, and uncontrolled query loops.
+ReconForge is an automated attack surface reconnaissance and service probing engine designed for authorized penetration testing, bug bounty assessments, and attack surface management. Because network scanners actively probe target infrastructure, they operate on sensitive network boundaries and must defend against weaponized DNS responses, Server-Side Request Forgery (SSRF), DNS rebinding, and cross-origin hijacking.
 
 ---
 
 ## 1. Threat Model & Mitigations
 
-### 1.1 Server-Side Request Forgery (SSRF) & Cloud IMDS Theft
+### 1.1 Server-Side Request Forgery (SSRF) & Cloud Metadata Defense
 
 #### The Attack Vector
-When actively probing discovered subdomains via HTTP/HTTPS (`probeLiveHost`), an adversary controlling DNS records for a target domain (or a malicious user scanning their own rogue domain) could configure a subdomain's `A` or `AAAA` record to point to:
+When actively probing discovered subdomains via HTTP/HTTPS, an adversary controlling DNS records for a target domain (or a malicious user scanning an adversarial domain) could configure a subdomain's `A` or `AAAA` record to point to:
 1. **Cloud Instance Metadata Service (IMDS)**: `169.254.169.254` (AWS EC2, GCP metadata, Azure instance metadata).
-2. **Local Loopback**: `127.0.0.1` or `127.0.0.0/8`, `::1`, `0:0:0:0:0:0:0:1`, `::`.
+2. **Local Loopback**: `127.0.0.1`, `127.0.0.0/8`, `::1`, `0:0:0:0:0:0:0:1`, `::`.
 3. **Internal RFC 1918 & Reserved Subnets**: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (CGNAT), `0.0.0.0/8`, `192.0.0.0/24`, `198.18.0.0/15`, `224.0.0.0/4` (Multicast), `240.0.0.0/4`.
 4. **IPv6 Private & Link-Local Ranges**: `fc00::/7` (Unique Local Addresses), `fe80::/10` (Link-Local Unicast), `ff00::/8` (Multicast).
-5. **IPv4-Mapped IPv6 Bypasses**: `::ffff:127.0.0.1`, `::ffff:169.254.169.254`, or hex equivalents (`::ffff:7f00:0001`).
+5. **Cross-Protocol & Encapsulated Bypasses**:
+   - IPv4-Mapped IPv6: `::ffff:127.0.0.1`, `::ffff:7f00:1`
+   - IPv4-Compatible IPv6: `::127.0.0.1`, `::7f00:1`
+   - NAT64 Well-Known Prefix: `64:ff9b::127.0.0.1`, `64:ff9b::7f00:1` (RFC 6052)
+   - 6to4 Anycast Encapsulation: `2002:7f00:1::1` (RFC 3056)
 
 #### ReconForge Mitigation
-ReconForge implements a defense-in-depth architecture using Node.js's native `net.BlockList`:
-1. **Subnet Parsing & Normalization**: Address strings are parsed and evaluated directly against binary CIDR subnets rather than naive prefix string matching. IPv4-mapped IPv6 addresses (`::ffff:`) are automatically unmapped and evaluated against IPv4 rules.
-2. **Connect-Time DNS Rebinding Defense**: To eliminate the check-then-use (TOCTOU) gap where a DNS server might return a public IP during pre-check and `127.0.0.1` during the socket connection, `safeHttpRequest` passes a custom `lookup` function directly to `http.request` / `https.request`. Every resolved `A` and `AAAA` address is validated at socket establishment time. If any address falls within the blocklist, the connection is aborted immediately (`ERR_SSRF_BLOCKED`) before any TCP SYN or TLS handshake.
+ReconForge implements multi-layer defense in depth:
+1. **Fail-Closed IP Parsing**: Address strings are parsed and evaluated directly against binary CIDR subnets using Node.js's native `net.BlockList`. Any unparseable string, malformed address, or garbage input fails closed (`isPrivateOrReservedIp` returns `true` / blocked).
+2. **Full IPv6 Encapsulation Decoding**: Decoders unwrap IPv4-mapped, IPv4-compatible, NAT64, and 6to4 encapsulation formats, extracting the embedded 32-bit IPv4 address and validating it against IPv4 private ranges.
+3. **Connect-Time DNS Rebinding Defense**: To eliminate the check-then-use (TOCTOU) gap where a DNS server returns a public IP during pre-check and `127.0.0.1` during socket connection, `safeHttpRequest` passes a custom `lookup` function directly to `http.request` / `https.request`. Every resolved `A` and `AAAA` address is validated at socket establishment time. If any address falls within the blocklist, the connection is aborted immediately (`ERR_SSRF_BLOCKED`) before any TCP SYN packet is transmitted.
+4. **Direct IP Literal Interception**: Because Node's HTTP client skips DNS `lookup` hooks when the URL hostname is an IP literal, `safeHttpRequest` validates IP literals before socket creation.
 
 ---
 
@@ -30,36 +36,68 @@ ReconForge implements a defense-in-depth architecture using Node.js's native `ne
 
 ---
 
-### 1.3 Wildcard DNS Handling & False-Positive Elimination
+### 1.3 Dual-Stack Wildcard DNS & Passive Record Preservation
 
-#### The Vulnerability
-If an organization configures a wildcard DNS record (`*.target.com IN A 192.0.2.1`), queries for non-existent subdomains resolve successfully. Without wildcard handling, common prefix dictionary guessing returns 100% false positives, and passive DNS hits under the wildcard zone flood the results with identical IPs.
+#### The Problem
+When a wildcard DNS record exists (`*.target.com IN A 192.0.2.1`), non-existent labels resolve to the wildcard IP. Naive dictionary guessing produces 100% false positives. However, dropping passive hits whose IP matches the wildcard IP is a critical mistake: passive records from Certificate Transparency (CT) or passive DNS telemetry represent authentic historical proof of host existence (often sharing a CDN or load balancer IP with the wildcard catch-all).
 
 #### ReconForge Mitigation
-1. **Automated Wildcard Pre-Check**: Before dictionary resolution, ReconForge tests a cryptographically randomized label (`_wildcard_check_<random>.<domain>`).
-2. **Dictionary Bypass**: If a wildcard record is detected, high-frequency prefix guessing is bypassed automatically.
-3. **Passive Hit Filtering**: Passive records collected from certificate logs and OSINT feeds are resolved against the detected wildcard IP set. Records that resolve exclusively to wildcard IPs are filtered to ensure only verified, distinct services are probed.
+1. **Dual-Stack Canary Probing**: ReconForge queries randomized canary labels (`_wildcard_v4_<rand>.<domain>` and `_wildcard_v6_<rand>.<domain>`) across both IPv4 and IPv6 resolvers to detect IPv4 and IPv6 wildcards.
+2. **Selective Dictionary Bypass**: When wildcard DNS is active, high-frequency dictionary prefix guessing is bypassed to prevent false-positive floods.
+3. **Passive Record Preservation**: All verified passive records (CT logs and OSINT feeds) are preserved and probed, with wildcard IPs annotated during inspection.
 
 ---
 
-### 1.4 Dangling CNAME Takeover Verification
+### 1.4 Subdomain Takeover Detection & NXDOMAIN Verification
 
-ReconForge actively resolves DNS `CNAME` records using `dns.resolveCname` for candidate subdomains.
-- **Confirmed Vulnerability**: If a subdomain's CNAME record explicitly points to an external cloud provider (e.g. `*.github.io`, `*.s3.amazonaws.com`, `*.herokudns.com`, `*.zendesk.com`, `*.myshopify.com`) AND the HTTP response matches the unclaimed service error signature, it is reported as a confirmed takeover risk with remediation steps.
-- **Unconfirmed / Possible Risk**: If the HTTP response body matches an error signature but no CNAME record is resolved (or does not point to the expected provider domain), it is labeled honestly as "Possible" with a reduced severity rating.
-
----
-
-### 1.5 Host Binding, CORS Origin Lockdown & DoS Prevention
-
-- **Host Binding**: Configurable via `process.env.HOST` (defaults to `0.0.0.0` in containerized/preview environments, configurable to `127.0.0.1` for standalone local deployment).
-- **Strict CORS Policy**: CORS origins are restricted to local addresses (`localhost`, `127.0.0.1`) and authorized preview origins. Unauthorized cross-origin requests from arbitrary websites are rejected.
-- **Bounded Request Limits & Deadlines**: Every HTTP request in `safeHttpRequest` enforces an overall deadline timer (with `req.destroy()`) and per-call response byte limits (`maxBytes`: 15MB for large Certificate Transparency JSON, 150KB for live host HTML inspection) to prevent slowloris dripping attacks and out-of-memory crashes.
-- **Scan History Eviction**: In-memory scan state is capped at 30 entries using bounded LRU eviction to prevent memory exhaustion during long-running sessions.
+ReconForge traverses DNS `CNAME` chains using `dns.resolveCname` and evaluates risk against known cloud provider signatures (AWS S3, GitHub Pages, Heroku, Zendesk, Shopify, Surge):
+- **Likely Subdomain Takeover**:
+  1. *Dangling CNAME to NXDOMAIN*: A subdomain's CNAME target resolves to `ENOTFOUND` / NXDOMAIN. The external resource does not exist in DNS and can be registered by an attacker.
+  2. *CNAME Match + Provider Error Fingerprint*: A subdomain's CNAME ends with an authentic provider suffix (`.github.io`, `.s3.amazonaws.com`) AND the HTTP response matches the unclaimed service error fingerprint.
+- **Potential / Unconfirmed**: If an HTTP body matches an error string but no CNAME points to the provider, it is labeled as "Potential" with low severity.
+- **Strict Suffix Matching**: Evaluates CNAME targets using `endsWith()` rather than substring matching (`includes()`), preventing bypasses like `x.github.io.attacker.net`.
+- **Ethical Boundary**: Real confirmation requires claiming the third-party asset on the cloud platform, which constitutes unauthorized modification and is strictly prohibited during scanning.
 
 ---
 
-## 2. Responsible Disclosure Policy
+### 1.5 Inbound DNS Rebinding, Localhost Binding & Session Protection
+
+- **Localhost Default Binding**: Network listeners default to `127.0.0.1` (`server.js` and `vite.config.js`), ensuring the daemon is inaccessible to other devices on the local area network (configurable via `HOST` env var).
+- **Inbound Host Header Validation**: All `/api` routes validate the incoming `Host` header against an explicit list of authorized local and preview hosts. Requests with arbitrary hostnames (such as an attacker-controlled domain rebinding to `127.0.0.1`) are rejected with `403 Forbidden`, preventing inbound DNS rebinding against the local daemon.
+- **Exact-Match CORS Policy**: CORS origins are restricted to exact-match authorized origins (`process.env.ALLOWED_ORIGINS`). `credentials: false` is enforced since no session cookies are used.
+- **Per-Session Token Authorization**: Mutating endpoints (`POST /api/recon/start`) require a cryptographically random session token (`x-reconforge-session`), defeating Cross-Origin Scanner Hijacking even if CORS were bypassed.
+- **Internal IP Leak Reporting**: Subdomains in public DNS resolving to private IP space are surfaced as dedicated vulnerability findings (split-horizon DNS exposure / internal topology leak).
+
+---
+
+## 2. Known Limitations
+
+Like all L7 and DNS-based security assessment tools, ReconForge operates within defined boundaries:
+
+1. **Layer 7 HTTP Scope**: Active service probing operates exclusively on HTTP and HTTPS (ports 80 and 443). Non-HTTP network services (e.g. SSH, SMTP, RDP, databases, or raw TCP/UDP listeners) are not port-scanned.
+2. **Upstream Resolver Trust**: DNS resolution relies on system-configured recursive resolvers (`/etc/resolv.conf`). Poisoned or tampering upstream recursive resolvers are outside the application's verification perimeter.
+3. **Out-of-Band Cloud Takeovers**: Certain modern cloud platforms require out-of-band verification tokens (e.g. TXT verification records) to claim dangling resources. A dangling CNAME indicates high risk, but takeover feasibility depends on provider-specific claim policies.
+4. **Third-Party OSINT Rate Limits**: Passive intelligence gathering depends on public external APIs (`crt.sh`, AlienVault OTX, HackerTarget) which may enforce temporary rate limits or latency spikes.
+
+---
+
+## 3. Core Architectural & Security Questions
+
+### Q1: Why does a pre-check in `probeLiveHost` alone not stop DNS rebinding?
+**Answer**: Because of the Time-of-Check to Time-of-Use (TOCTOU) gap. When an attacker operates an authoritative DNS server for their domain (`rebind.attacker.com`), they can configure their nameserver to return a benign public IP address (such as `8.8.8.8`) with a Time-To-Live (TTL) of 0 seconds. A pre-check in `probeLiveHost` inspects `8.8.8.8` and declares the address safe. Moments later, when `http.request()` establishes the TCP socket connection, the DNS cache has expired, causing Node's networking stack to issue a second DNS query. The attacker's nameserver now returns `127.0.0.1` or `169.254.169.254`. The connection is established directly to the local loopback or cloud metadata service.
+To stop rebinding, validation must occur at the moment of socket connection. ReconForge injects a custom `lookup` hook into `http.request()`, validating every `A` and `AAAA` address selected for the TCP SYN packet before the socket opens.
+
+### Q2: Why does CORS not stop a client on your LAN?
+**Answer**: CORS (Cross-Origin Resource Sharing) is an in-browser security mechanism enforced solely by web browsers when JavaScript running on a webpage makes a cross-origin request. CORS does not apply to non-browser clients. A device on your local network, a rogue script, a compromised IoT device, or a simple `curl` command sends direct TCP/HTTP packets to the daemon's port without an `Origin` header and without a browser sandbox.
+To protect against LAN neighbors, the server must bind strictly to the loopback interface (`127.0.0.1`), validate the `Host` header to prevent DNS rebinding, and enforce cryptographically random session tokens on mutating operations.
+
+### Q3: Why is a passive record under a wildcard zone still evidence?
+**Answer**: Wildcard DNS (`*.example.com -> IP`) is a zone-level catch-all routing mechanism where any non-existent host label resolves to that IP. Dictionary brute-force guesses (`mail.example.com`, `admin.example.com`) are speculative hypotheses that produce 100% false positives under a wildcard zone.
+In contrast, passive records harvested from Certificate Transparency logs (`crt.sh`) or historical passive DNS telemetry represent cryptographic proof that a Certificate Authority signed an X.509 certificate for that exact hostname, or that real network sensors previously observed traffic to it. Even if that hostname currently resolves to the same CDN, load balancer, or reverse proxy IP as the wildcard catch-all, the host represents an authentic, historically declared asset. Therefore, a sound recon engine must bypass dictionary guessing while preserving and probing all verified passive records.
+
+---
+
+## 4. Responsible Disclosure Policy
 
 If you discover a security vulnerability within ReconForge:
 1. Please report it privately by opening a security advisory or contacting the maintainer directly.
@@ -68,6 +106,6 @@ If you discover a security vulnerability within ReconForge:
 
 ---
 
-## 3. Permitted & Authorized Use
+## 5. Permitted & Authorized Use
 
-ReconForge performs active network requests (DNS queries and HTTP/HTTPS GET requests) during stage 5. **You must only scan domain names you own or have explicit written permission to assess under an authorized bug bounty program or penetration testing engagement.**
+ReconForge performs active network requests (DNS queries and HTTP/HTTPS GET requests). **You must only scan domain names you own or have explicit written permission to assess under an authorized bug bounty program or penetration testing engagement.**
