@@ -65,8 +65,8 @@ ReconForge traverses DNS `CNAME` chains using `dns.resolveCname` and evaluates r
 - **Localhost Default Binding**: Network listeners default to `127.0.0.1` (`server.js` and `vite.config.js`), ensuring the daemon is inaccessible to other devices on the local area network (configurable via `HOST` env var).
 - **Inbound Host Header Validation**: All `/api` routes validate the incoming `Host` header against an explicit list of authorized local and preview hosts. Requests with arbitrary hostnames (such as an attacker-controlled domain rebinding to `127.0.0.1`) are rejected with `403 Forbidden`, preventing inbound DNS rebinding against the local daemon.
 - **Exact-Match CORS Policy**: CORS origins are restricted to exact-match authorized origins (`process.env.ALLOWED_ORIGINS`). `credentials: false` is enforced since no session cookies are used.
-- **Per-Session Token Authorization**: Mutating endpoints (`POST /api/recon/start`) require a cryptographically random session token (`x-reconforge-session`), defeating Cross-Origin Scanner Hijacking even if CORS were bypassed.
-- **Internal IP Leak Reporting**: Subdomains in public DNS resolving to private IP space are surfaced as dedicated vulnerability findings (split-horizon DNS exposure / internal topology leak).
+- **Per-Session Token Anti-CSRF Defense**: Mutating endpoints (`POST /api/recon/start`) require a cryptographically random session token (`x-reconforge-session`) validated with constant-time comparison (`crypto.timingSafeEqual`). Note that `SESSION_TOKEN` is specifically designed as an in-browser anti-CSRF / Cross-Origin Scanner Hijacking defense to prevent malicious websites visited by the user from triggering scans on the local daemon; it is not a multi-tenant user authentication system. When `HOST=0.0.0.0` or running in a container, `GET /api/session` is reachable on the configured listening interface.
+- **Classified Internal IP Leak Reporting**: Subdomains in public DNS resolving to private IP space are categorized and reported by range (loopback as informational, RFC 1918 / IPv6 ULA as medium, IMDS as high, and CGNAT/multicast as low).
 
 ---
 
@@ -81,19 +81,11 @@ Like all L7 and DNS-based security assessment tools, ReconForge operates within 
 
 ---
 
-## 3. Core Architectural & Security Questions
+## 3. Architecture & Technical Rationale
 
-### Q1: Why does a pre-check in `probeLiveHost` alone not stop DNS rebinding?
-**Answer**: Because of the Time-of-Check to Time-of-Use (TOCTOU) gap. When an attacker operates an authoritative DNS server for their domain (`rebind.attacker.com`), they can configure their nameserver to return a benign public IP address (such as `8.8.8.8`) with a Time-To-Live (TTL) of 0 seconds. A pre-check in `probeLiveHost` inspects `8.8.8.8` and declares the address safe. Moments later, when `http.request()` establishes the TCP socket connection, the DNS cache has expired, causing Node's networking stack to issue a second DNS query. The attacker's nameserver now returns `127.0.0.1` or `169.254.169.254`. The connection is established directly to the local loopback or cloud metadata service.
-To stop rebinding, validation must occur at the moment of socket connection. ReconForge injects a custom `lookup` hook into `http.request()`, validating every `A` and `AAAA` address selected for the TCP SYN packet before the socket opens.
+For in-depth design discussions, technical rationale, and answers to core security engineering questions (including DNS rebinding TOCTOU analysis, why CORS does not stop LAN neighbors, and why passive records under wildcard zones represent authentic cryptographic evidence), please refer to:
 
-### Q2: Why does CORS not stop a client on your LAN?
-**Answer**: CORS (Cross-Origin Resource Sharing) is an in-browser security mechanism enforced solely by web browsers when JavaScript running on a webpage makes a cross-origin request. CORS does not apply to non-browser clients. A device on your local network, a rogue script, a compromised IoT device, or a simple `curl` command sends direct TCP/HTTP packets to the daemon's port without an `Origin` header and without a browser sandbox.
-To protect against LAN neighbors, the server must bind strictly to the loopback interface (`127.0.0.1`), validate the `Host` header to prevent DNS rebinding, and enforce cryptographically random session tokens on mutating operations.
-
-### Q3: Why is a passive record under a wildcard zone still evidence?
-**Answer**: Wildcard DNS (`*.example.com -> IP`) is a zone-level catch-all routing mechanism where any non-existent host label resolves to that IP. Dictionary brute-force guesses (`mail.example.com`, `admin.example.com`) are speculative hypotheses that produce 100% false positives under a wildcard zone.
-In contrast, passive records harvested from Certificate Transparency logs (`crt.sh`) or historical passive DNS telemetry represent cryptographic proof that a Certificate Authority signed an X.509 certificate for that exact hostname, or that real network sensors previously observed traffic to it. Even if that hostname currently resolves to the same CDN, load balancer, or reverse proxy IP as the wildcard catch-all, the host represents an authentic, historically declared asset. Therefore, a sound recon engine must bypass dictionary guessing while preserving and probing all verified passive records.
+👉 **[docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md)**
 
 ---
 

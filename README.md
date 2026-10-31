@@ -33,7 +33,7 @@ Unlike basic scanners that blindly curl resolved addresses, ReconForge actively 
 - **Wildcard DNS Handling**: Bypasses dictionary guessing under wildcard zones while preserving all verified passive records from Certificate Transparency and passive DNS.
 - **Subdomain Takeover Verification**: Queries DNS `CNAME` records via `dns.resolveCname`, checks for NXDOMAIN on CNAME targets, strictly evaluates suffixes via `endsWith()`, and classifies findings into calibrated "Likely" and "Potential" certainty tiers.
 
-For in-depth analysis, known limitations, and architecture Q&A, see [SECURITY.md](SECURITY.md).
+For in-depth threat modeling and limitations, see [SECURITY.md](SECURITY.md). For deep technical rationale and architecture questions, see [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md).
 
 ---
 
@@ -42,6 +42,8 @@ For in-depth analysis, known limitations, and architecture Q&A, see [SECURITY.md
 ```text
 ReconForge/
 ├── server.js               # Native Node.js engine, SSRF firewall, API routes & SSE streaming
+├── docs/
+│   └── DESIGN_NOTES.md     # Deep architecture rationale & interview Q&A
 ├── test/
 │   └── sanity.test.js      # Unit tests for domain sanitizer, Punycode, SSRF filter, wildcard DNS, CNAME
 ├── src/
@@ -54,7 +56,7 @@ ReconForge/
 │       ├── ScanProgress.jsx    # Real-time multi-stage progress & auto-redirect
 │       ├── ScanWorkflow.jsx    # Visual 6-step pipeline status tracker
 │       ├── ResultsView.jsx     # Tabbed attack surface analysis workspace
-│       ├── TopologyGraph.jsx   # Interactive 60fps HTML5 Canvas constellation map
+│       ├── TopologyGraph.jsx   # Interactive HTML5 Canvas constellation map
 │       ├── RiskScanner.jsx     # Subdomain takeover signatures & High-Value Targets (HVT)
 │       ├── LiveHostsTable.jsx  # HTTP/HTTPS status, latency, IP, tech stack & search
 │       ├── SubdomainsTable.jsx # Clean FQDN search, prefix badges, clipboard export

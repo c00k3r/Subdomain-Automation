@@ -2,14 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import {
+  app,
   sanitizeDomain,
   isValidDomain,
   isPrivateOrReservedIp,
   detectWildcardDNS,
   checkTakeoverRisk,
+  classifyIpRisk,
   isAllowedOrigin,
   isValidHostHeader,
   safeHttpRequest,
+  isTokenValid,
+  SESSION_TOKEN,
+  scans,
+  storeScan,
+  getScan,
+  MAX_SCANS,
 } from '../server.js';
 
 test('sanitizeDomain - normalizes raw user inputs', () => {
@@ -120,16 +128,95 @@ test('isPrivateOrReservedIp - fails closed on invalid input and blocks all SSRF 
   assert.equal(isPrivateOrReservedIp('2606:4700:4700::1111'), false, 'Cloudflare IPv6 must be allowed');
 });
 
+test('classifyIpRisk - accurately classifies internal IP ranges with tiered severities', () => {
+  // Loopback (INFO)
+  const loopback4 = classifyIpRisk('127.0.0.1');
+  assert.equal(loopback4.severity, 'INFO');
+  assert.equal(loopback4.title, 'Localhost / Loopback Mapping');
+
+  const loopback6 = classifyIpRisk('::1');
+  assert.equal(loopback6.severity, 'INFO');
+
+  // RFC 1918 & IPv6 ULA (MEDIUM)
+  const rfc10 = classifyIpRisk('10.0.5.23');
+  assert.equal(rfc10.severity, 'MEDIUM');
+  assert.equal(rfc10.title, 'Internal IP Leak / RFC 1918 Exposure');
+
+  const rfc172 = classifyIpRisk('172.16.4.1');
+  assert.equal(rfc172.severity, 'MEDIUM');
+
+  const rfc192 = classifyIpRisk('192.168.1.1');
+  assert.equal(rfc192.severity, 'MEDIUM');
+
+  const ula = classifyIpRisk('fd00:abcd::1');
+  assert.equal(ula.severity, 'MEDIUM');
+
+  // Cloud IMDS & Link-local (HIGH)
+  const imds = classifyIpRisk('169.254.169.254');
+  assert.equal(imds.severity, 'HIGH');
+  assert.equal(imds.title, 'Link-Local / Cloud IMDS Mapping');
+
+  const linkLocal6 = classifyIpRisk('fe80::1');
+  assert.equal(linkLocal6.severity, 'HIGH');
+
+  // CGNAT (LOW)
+  const cgnat = classifyIpRisk('100.64.1.1');
+  assert.equal(cgnat.severity, 'LOW');
+  assert.equal(cgnat.title, 'Carrier-Grade NAT Address (RFC 6598)');
+
+  // Multicast / Reserved (LOW)
+  const multi = classifyIpRisk('224.0.0.1');
+  assert.equal(multi.severity, 'LOW');
+  assert.equal(multi.title, 'Reserved / Multicast IP Address');
+});
+
+test('isTokenValid - performs constant-time cryptographic token verification', () => {
+  assert.equal(isTokenValid(SESSION_TOKEN), true);
+  assert.equal(isTokenValid('wrong-token-value'), false);
+  assert.equal(isTokenValid(''), false);
+  assert.equal(isTokenValid(null), false);
+  assert.equal(isTokenValid(undefined), false);
+});
+
+test('storeScan and getScan - implements true LRU cache and preserves running scans', () => {
+  scans.clear();
+
+  // Populate scans
+  for (let i = 1; i <= MAX_SCANS; i++) {
+    storeScan(`scan_${i}`, {
+      id: `scan_${i}`,
+      status: i === 1 ? 'running' : 'completed',
+      step: 1,
+    });
+  }
+
+  assert.equal(scans.size, MAX_SCANS);
+  assert.equal(scans.has('scan_1'), true); // scan_1 is running
+
+  // Reading scan_2 refreshes its recency in the LRU Map
+  getScan('scan_2');
+
+  // Adding an additional scan triggers eviction of oldest NON-running scan
+  // scan_1 is running (cannot be evicted), scan_2 was accessed (moved to MRU)
+  // scan_3 is the oldest completed scan and must be evicted
+  storeScan(`scan_${MAX_SCANS + 1}`, {
+    id: `scan_${MAX_SCANS + 1}`,
+    status: 'completed',
+  });
+
+  assert.equal(scans.size, MAX_SCANS);
+  assert.equal(scans.has('scan_1'), true, 'Running scan_1 must NEVER be evicted');
+  assert.equal(scans.has('scan_2'), true, 'Recently accessed scan_2 must not be evicted');
+  assert.equal(scans.has('scan_3'), false, 'Oldest completed scan_3 should be evicted');
+});
+
 test('isValidHostHeader - protects against inbound DNS rebinding', () => {
-  // Authorized local and preview host headers
+  // Authorized local host headers
   assert.equal(isValidHostHeader('localhost'), true);
   assert.equal(isValidHostHeader('localhost:3000'), true);
+  assert.equal(isValidHostHeader('127.0.0.1'), true);
   assert.equal(isValidHostHeader('127.0.0.1:3000'), true);
   assert.equal(isValidHostHeader('127.0.0.1:5173'), true);
-  assert.equal(
-    isValidHostHeader('ais-dev-sihmny3awbbh2y7w73gwjj-981974432220.asia-southeast1.run.app'),
-    true
-  );
 
   // Unauthorized host headers (inbound DNS rebinding attempts)
   assert.equal(isValidHostHeader('evil.attacker.com'), false);
@@ -147,10 +234,6 @@ test('isAllowedOrigin - exact matching blocks arbitrary subdomains and attacker 
   // Authorized exact origins
   assert.equal(isAllowedOrigin('http://localhost:3000'), true);
   assert.equal(isAllowedOrigin('http://127.0.0.1:3000'), true);
-  assert.equal(
-    isAllowedOrigin('https://ais-dev-sihmny3awbbh2y7w73gwjj-981974432220.asia-southeast1.run.app'),
-    true
-  );
 
   // Block attacker domains that previously slipped through loose regex/includes
   assert.equal(isAllowedOrigin('https://evil.run.app'), false, 'Must block arbitrary evil.run.app');
@@ -187,42 +270,149 @@ test('detectWildcardDNS - tests both IPv4 and IPv6 canary addresses', async () =
   assert.deepEqual(resClean.wildcardIps, []);
 });
 
-test('checkTakeoverRisk - strict endsWith matching, NXDOMAIN verification, and Likely certainty', async () => {
-  // 1. Strict suffix matching: x.github.io.attacker.net must NOT match GitHub Pages
-  const attackerCnameResolver = async () => ['x.github.io.attacker.net'];
-  const attackerRes = await checkTakeoverRisk(
-    'sub.attacker.net',
-    404,
-    "There isn't a GitHub Pages site here.",
-    attackerCnameResolver
-  );
-  // Body matches signature, but CNAME target is attacker domain, so it must NOT be confirmed as GitHub Pages takeover
-  assert.ok(attackerRes);
-  assert.equal(attackerRes.certainty, 'Potential');
-
-  // 2. Dangling CNAME pointing to NXDOMAIN target -> Likely Subdomain Takeover
-  const legitCnameResolver = async () => ['abandoned-bucket.s3.amazonaws.com'];
+test('checkTakeoverRisk - verified per-resource cloud services and exact S3 suffixes', async () => {
   const nxDomainTargetResolver = async () => {
     const err = new Error('ENOTFOUND');
     err.code = 'ENOTFOUND';
     throw err;
   };
-  const nxRes = await checkTakeoverRisk(
+
+  // 1. Dead ELB CNAME (*.elb.amazonaws.com) must NOT be flagged as S3 takeover!
+  const elbCnameResolver = async () => ['my-load-balancer.elb.amazonaws.com'];
+  const elbRes = await checkTakeoverRisk(
+    'app.target.com',
+    0,
+    '',
+    elbCnameResolver,
+    nxDomainTargetResolver
+  );
+  assert.equal(elbRes, null, 'Dead ELB CNAME must NOT be reported as S3 takeover');
+
+  // 2. Exact S3 suffix (.s3.amazonaws.com) with NXDOMAIN -> Likely Takeover
+  const s3CnameResolver = async () => ['abandoned-bucket.s3.amazonaws.com'];
+  const s3Res = await checkTakeoverRisk(
     'assets.target.com',
     0,
     '',
-    legitCnameResolver,
+    s3CnameResolver,
     nxDomainTargetResolver
   );
-  assert.ok(nxRes);
-  assert.equal(nxRes.isVulnerable, true);
-  assert.equal(nxRes.certainty, 'Likely');
-  assert.equal(nxRes.service, 'Amazon S3');
-  assert.equal(nxRes.cname, 'abandoned-bucket.s3.amazonaws.com');
+  assert.ok(s3Res);
+  assert.equal(s3Res.isVulnerable, true);
+  assert.equal(s3Res.certainty, 'Likely');
+  assert.equal(s3Res.service, 'Amazon S3');
 
-  // 3. Normal 200 response -> No risk
-  const cleanRes = await checkTakeoverRisk('sub.example.com', 200, '<html>OK</html>');
-  assert.equal(cleanRes, null);
+  // 3. AWS Elastic Beanstalk per-resource CNAME (.elasticbeanstalk.com) with NXDOMAIN -> Likely Takeover
+  const ebCnameResolver = async () => ['my-env.elasticbeanstalk.com'];
+  const ebRes = await checkTakeoverRisk(
+    'api.target.com',
+    0,
+    '',
+    ebCnameResolver,
+    nxDomainTargetResolver
+  );
+  assert.ok(ebRes);
+  assert.equal(ebRes.isVulnerable, true);
+  assert.equal(ebRes.certainty, 'Likely');
+  assert.equal(ebRes.service, 'AWS Elastic Beanstalk');
+
+  // 4. ESERVFAIL must NOT trigger takeover false positive
+  const servFailResolver = async () => {
+    const err = new Error('ESERVFAIL');
+    err.code = 'ESERVFAIL';
+    throw err;
+  };
+  const servFailRes = await checkTakeoverRisk(
+    'flaky.target.com',
+    0,
+    '',
+    ebCnameResolver,
+    servFailResolver
+  );
+  assert.equal(servFailRes, null, 'Resolver ESERVFAIL must never trigger takeover');
+});
+
+test('Live Express API tests: Host header rebinding protection & session token enforcement', async () => {
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  try {
+    // 1. Inbound Host Header: Malicious Host header returns 403
+    const badHostStatus = await new Promise((resolve) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/api/session',
+          method: 'GET',
+          headers: { Host: 'evil.attacker.com' },
+        },
+        (res) => resolve(res.statusCode)
+      );
+      req.end();
+    });
+    assert.equal(badHostStatus, 403, 'Inbound Host header rebinding must be blocked with 403');
+
+    // 2. Inbound Host Header: Valid Host header returns 200
+    const goodHostStatus = await new Promise((resolve) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/api/session',
+          method: 'GET',
+          headers: { Host: `127.0.0.1:${port}` },
+        },
+        (res) => resolve(res.statusCode)
+      );
+      req.end();
+    });
+    assert.equal(goodHostStatus, 200, 'Valid Host header must return 200');
+
+    // 3. POST /api/recon/start without session token returns 403
+    const noTokenStatus = await new Promise((resolve) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/api/recon/start',
+          method: 'POST',
+          headers: {
+            Host: `127.0.0.1:${port}`,
+            'Content-Type': 'application/json',
+          },
+        },
+        (res) => resolve(res.statusCode)
+      );
+      req.write(JSON.stringify({ domain: 'owasp.org' }));
+      req.end();
+    });
+    assert.equal(noTokenStatus, 403, 'Missing session token must return 403');
+
+    // 4. POST /api/recon/start with valid session token returns 200
+    const validTokenStatus = await new Promise((resolve) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/api/recon/start',
+          method: 'POST',
+          headers: {
+            Host: `127.0.0.1:${port}`,
+            'Content-Type': 'application/json',
+            'x-reconforge-session': SESSION_TOKEN,
+          },
+        },
+        (res) => resolve(res.statusCode)
+      );
+      req.write(JSON.stringify({ domain: 'owasp.org' }));
+      req.end();
+    });
+    assert.equal(validTokenStatus, 200, 'Valid session token must return 200');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test('Live SSRF defense: verifies connection-time hook blocks loopback and local server receives 0 hits', async () => {

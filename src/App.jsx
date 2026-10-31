@@ -35,9 +35,11 @@ export default function App() {
   };
 
   // Fetch scan history
-  const fetchHistory = async () => {
+  const fetchHistory = async (token = sessionToken) => {
     try {
-      const res = await fetch('/api/recon/history');
+      const res = await fetch('/api/recon/history', {
+        headers: token ? { 'x-reconforge-session': token } : {},
+      });
       if (res.ok) {
         const data = await res.json();
         setScansList(data);
@@ -47,16 +49,18 @@ export default function App() {
     }
   };
 
-  const fetchScanDetails = async (scanId, andShowResults = true) => {
+  const fetchScanDetails = async (scanId, andShowResults = true, token = sessionToken) => {
     try {
-      const res = await fetch(`/api/recon/scan/${scanId}`);
+      const res = await fetch(`/api/recon/scan/${scanId}`, {
+        headers: token ? { 'x-reconforge-session': token } : {},
+      });
       if (res.ok) {
         const data = await res.json();
         setActiveScan(data);
         if (data.status === 'running') {
           setIsScanning(true);
           setCurrentView('scanning');
-          listenToScan(scanId);
+          listenToScan(scanId, token);
         } else if (andShowResults) {
           setIsScanning(false);
           setCurrentView('results');
@@ -68,15 +72,16 @@ export default function App() {
   };
 
   useEffect(() => {
-    fetchSessionToken();
-    fetchHistory();
+    fetchSessionToken().then((token) => {
+      fetchHistory(token);
+    });
     return () => {
       if (eventSourceRef.current) eventSourceRef.current.close();
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     };
   }, []);
 
-  const listenToScan = (scanId) => {
+  const listenToScan = (scanId, token = sessionToken) => {
     setIsScanning(true);
     setCurrentView('scanning');
 
@@ -90,20 +95,32 @@ export default function App() {
       setCurrentView('results');
       if (eventSourceRef.current) eventSourceRef.current.close();
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-      fetchHistory();
+      fetchHistory(token);
     };
 
-    // 1. Server-Sent Events stream
+    // 1. Server-Sent Events stream with token query parameter
     try {
-      const es = new EventSource(`/api/recon/stream/${scanId}`);
+      const streamToken = token || sessionToken;
+      const streamUrl = `/api/recon/stream/${scanId}${streamToken ? `?token=${encodeURIComponent(streamToken)}` : ''}`;
+      const es = new EventSource(streamUrl);
       eventSourceRef.current = es;
 
       es.onmessage = (event) => {
         try {
           const update = JSON.parse(event.data);
-          setActiveScan(update);
-          if (update.status === 'completed' || update.status === 'failed') {
-            onFinish(update);
+          if (update.type === 'log') {
+            setActiveScan((prev) => {
+              if (!prev) return prev;
+              return {
+                ...prev,
+                logs: [...(prev.logs || []), update.line],
+              };
+            });
+          } else {
+            setActiveScan(update);
+            if (update.status === 'completed' || update.status === 'failed') {
+              onFinish(update);
+            }
           }
         } catch (err) {
           console.error('SSE parse error:', err);
@@ -114,7 +131,9 @@ export default function App() {
         es.close();
         // Check current status on server directly
         try {
-          const res = await fetch(`/api/recon/scan/${scanId}`);
+          const res = await fetch(`/api/recon/scan/${scanId}`, {
+            headers: streamToken ? { 'x-reconforge-session': streamToken } : {},
+          });
           if (res.ok) {
             const data = await res.json();
             setActiveScan(data);
@@ -133,7 +152,10 @@ export default function App() {
     // 2. Fallback Interval Poller (every 1s) to ensure we NEVER get stuck on Step 6
     pollTimerRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`/api/recon/scan/${scanId}`);
+        const streamToken = token || sessionToken;
+        const res = await fetch(`/api/recon/scan/${scanId}`, {
+          headers: streamToken ? { 'x-reconforge-session': streamToken } : {},
+        });
         if (res.ok) {
           const data = await res.json();
           setActiveScan(data);
@@ -164,7 +186,7 @@ export default function App() {
           'Content-Type': 'application/json',
           'x-reconforge-session': token || '',
         },
-        body: JSON.stringify({ domain, sessionToken: token }),
+        body: JSON.stringify({ domain }),
       });
 
       if (!res.ok) {
@@ -173,8 +195,8 @@ export default function App() {
       }
 
       const { scanId } = await res.json();
-      fetchScanDetails(scanId, false);
-      listenToScan(scanId);
+      fetchScanDetails(scanId, false, token);
+      listenToScan(scanId, token);
     } catch (err) {
       setErrorMessage(err.message || 'Failed to start scan');
       setIsScanning(false);

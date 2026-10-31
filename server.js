@@ -24,15 +24,16 @@ const ALLOWED_HOSTS = new Set([
   '127.0.0.1',
   '127.0.0.1:3000',
   '127.0.0.1:5173',
-  'ais-dev-sihmny3awbbh2y7w73gwjj-981974432220.asia-southeast1.run.app',
-  'ais-pre-sihmny3awbbh2y7w73gwjj-981974432220.asia-southeast1.run.app',
 ]);
 
-const envHosts = (process.env.ALLOWED_HOSTS || '')
-  .split(',')
-  .map(h => h.trim().toLowerCase())
-  .filter(Boolean);
-for (const h of envHosts) ALLOWED_HOSTS.add(h);
+const rawEnvHosts = [
+  process.env.ALLOWED_HOSTS,
+  process.env.NG_ALLOWED_HOSTS,
+].filter(Boolean).join(',');
+
+for (const h of rawEnvHosts.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)) {
+  ALLOWED_HOSTS.add(h);
+}
 
 export function isValidHostHeader(hostHeader) {
   if (!hostHeader || typeof hostHeader !== 'string') return false;
@@ -48,15 +49,28 @@ const DEFAULT_ALLOWED_ORIGINS = new Set([
   'http://127.0.0.1:3000',
   'http://localhost:5173',
   'http://127.0.0.1:5173',
-  'https://ais-dev-sihmny3awbbh2y7w73gwjj-981974432220.asia-southeast1.run.app',
-  'https://ais-pre-sihmny3awbbh2y7w73gwjj-981974432220.asia-southeast1.run.app',
 ]);
 
-const envOrigins = (process.env.ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(o => o.trim().toLowerCase().replace(/\/+$/, ''))
-  .filter(Boolean);
-for (const o of envOrigins) DEFAULT_ALLOWED_ORIGINS.add(o);
+const rawEnvOrigins = [
+  process.env.ALLOWED_ORIGINS,
+].filter(Boolean).join(',');
+
+for (const o of rawEnvOrigins.split(',').map(s => s.trim().toLowerCase().replace(/\/+$/, '')).filter(Boolean)) {
+  DEFAULT_ALLOWED_ORIGINS.add(o);
+}
+
+// Ingest runtime preview URL if provided by hosting environment
+const runtimeUrl = process.env.APP_URL || process.env.PUBLIC_URL;
+if (runtimeUrl) {
+  try {
+    const u = new URL(runtimeUrl);
+    ALLOWED_HOSTS.add(u.host.toLowerCase());
+    ALLOWED_HOSTS.add(u.hostname.toLowerCase());
+    DEFAULT_ALLOWED_ORIGINS.add(u.origin.toLowerCase());
+  } catch {
+    // ignore
+  }
+}
 
 export function isAllowedOrigin(origin) {
   // Allow non-browser requests (CLI, curl, server-to-server)
@@ -92,25 +106,55 @@ app.use('/api', (req, res, next) => {
 // Cryptographically random per-session token to defeat Cross-Origin Scanner Hijacking
 export const SESSION_TOKEN = crypto.randomBytes(24).toString('hex');
 
+export function isTokenValid(token) {
+  if (!token || typeof token !== 'string') return false;
+  const a = Buffer.from(token);
+  const b = Buffer.from(SESSION_TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 app.get('/api/session', (_req, res) => {
   res.json({ token: SESSION_TOKEN });
 });
 
-// In-memory store for active and past user scans with LRU/bounded eviction
-const MAX_SCANS = 30;
-const scans = new Map();
+// In-memory store for active and past user scans with true LRU eviction (never evicting running scans)
+export const MAX_SCANS = 30;
+export const scans = new Map();
 const sseClients = new Map();
 
-function storeScan(scanId, scanData) {
-  if (scans.size >= MAX_SCANS) {
-    const oldestKey = scans.keys().next().value;
-    if (oldestKey) {
-      scans.delete(oldestKey);
-      const clients = sseClients.get(oldestKey) || [];
+export function getScan(scanId) {
+  const scan = scans.get(scanId);
+  if (scan) {
+    // Refresh recency in Map (LRU)
+    scans.delete(scanId);
+    scans.set(scanId, scan);
+  }
+  return scan;
+}
+
+export function storeScan(scanId, scanData) {
+  if (scans.has(scanId)) {
+    scans.delete(scanId);
+  } else if (scans.size >= MAX_SCANS) {
+    // Find oldest completed or failed scan to evict; do NOT evict running scans!
+    let evictedKey = null;
+    for (const [key, scan] of scans.entries()) {
+      if (scan.status !== 'running') {
+        evictedKey = key;
+        break;
+      }
+    }
+    // If all scans are running, evict oldest to avoid unbounded memory exhaustion
+    if (!evictedKey) {
+      evictedKey = scans.keys().next().value;
+    }
+    if (evictedKey) {
+      scans.delete(evictedKey);
+      const clients = sseClients.get(evictedKey) || [];
       for (const client of clients) {
         try { client.end(); } catch {}
       }
-      sseClients.delete(oldestKey);
+      sseClients.delete(evictedKey);
     }
   }
   scans.set(scanId, scanData);
@@ -130,7 +174,16 @@ function broadcastScanUpdate(scanId, scan) {
 
 function appendLog(scan, line) {
   scan.logs.push(line);
-  broadcastScanUpdate(scan.id, scan);
+  // Send delta log event to active SSE clients instead of re-serializing the entire scan object
+  const clients = sseClients.get(scan.id) || [];
+  const payload = `data: ${JSON.stringify({ type: 'log', line })}\n\n`;
+  for (const res of clients) {
+    try {
+      res.write(payload);
+    } catch {
+      // client disconnected
+    }
+  }
 }
 
 // Clean and sanitize domain input
@@ -634,7 +687,14 @@ const TAKEOVER_SERVICES = [
   },
   {
     service: 'Amazon S3',
-    cnameSuffixes: ['.s3.amazonaws.com', '.s3-website', '.amazonaws.com'],
+    // Exact S3 suffixes only; never broad .amazonaws.com which falsely flags ELBs (*.elb.amazonaws.com)
+    cnameSuffixes: [
+      '.s3.amazonaws.com',
+      '.s3-website.amazonaws.com',
+      '.s3-website-us-east-1.amazonaws.com',
+      '.s3-website.us-east-1.amazonaws.com',
+      '.s3.dualstack.us-east-1.amazonaws.com',
+    ],
     fingerprints: [
       'the specified bucket does not exist',
       'nosuchbucket',
@@ -642,6 +702,42 @@ const TAKEOVER_SERVICES = [
     severity: 'CRITICAL',
     confirmedReason: 'Dangling CNAME points to deleted or unregistered S3 bucket.',
     remediation: 'Claim the S3 bucket in your AWS account or delete the CNAME record.',
+  },
+  {
+    service: 'AWS Elastic Beanstalk',
+    cnameSuffixes: ['.elasticbeanstalk.com'],
+    fingerprints: [],
+    severity: 'HIGH',
+    confirmedReason: 'Dangling CNAME points to deleted or released Elastic Beanstalk environment (NXDOMAIN).',
+    remediation: 'Claim the Elastic Beanstalk environment name in AWS or delete the CNAME record.',
+  },
+  {
+    service: 'Azure Web App',
+    cnameSuffixes: ['.azurewebsites.net'],
+    fingerprints: [
+      '404 web app not found',
+    ],
+    severity: 'HIGH',
+    confirmedReason: 'Dangling CNAME points to unregistered or deleted Azure Web App.',
+    remediation: 'Claim the Web App hostname in Azure App Service or delete the DNS record.',
+  },
+  {
+    service: 'Azure Traffic Manager',
+    cnameSuffixes: ['.trafficmanager.net'],
+    fingerprints: [],
+    severity: 'HIGH',
+    confirmedReason: 'Dangling CNAME points to non-existent Azure Traffic Manager profile (NXDOMAIN).',
+    remediation: 'Recreate the Traffic Manager profile in Azure or remove the CNAME.',
+  },
+  {
+    service: 'Fastly',
+    cnameSuffixes: ['.fastly.net', '.fastlylb.net'],
+    fingerprints: [
+      'fastly error: unknown domain',
+    ],
+    severity: 'MEDIUM',
+    confirmedReason: 'Dangling CNAME points to unclaimed Fastly CDN service.',
+    remediation: 'Add the domain to your Fastly service or remove the CNAME.',
   },
   {
     service: 'Heroku',
@@ -653,6 +749,16 @@ const TAKEOVER_SERVICES = [
     severity: 'HIGH',
     confirmedReason: 'Dangling CNAME points to released Heroku application.',
     remediation: 'Claim the Heroku app name or remove DNS record.',
+  },
+  {
+    service: 'Ghost(Pro)',
+    cnameSuffixes: ['.ghost.io'],
+    fingerprints: [
+      'the thing you were looking for is no longer here',
+    ],
+    severity: 'MEDIUM',
+    confirmedReason: 'Dangling CNAME points to unclaimed Ghost blog.',
+    remediation: 'Claim the Ghost blog or delete the CNAME record.',
   },
   {
     service: 'Zendesk',
@@ -729,7 +835,8 @@ export async function checkTakeoverRisk(
       try {
         await targetResolverFn(matchingCname);
       } catch (err) {
-        if (err && (err.code === 'ENOTFOUND' || err.code === 'NODATA' || err.code === 'ESERVFAIL')) {
+        // Only count genuine NXDOMAIN (Node's ENOTFOUND). Drop ESERVFAIL and NODATA so resolver flakiness never produces false positives.
+        if (err && err.code === 'ENOTFOUND') {
           targetNxDomain = true;
         }
       }
@@ -773,6 +880,121 @@ export async function checkTakeoverRisk(
   return null;
 }
 
+// Differentiates internal/reserved IPs by range with accurate severity tiers
+export function classifyIpRisk(ip) {
+  if (!ip || typeof ip !== 'string') {
+    return {
+      severity: 'LOW',
+      title: 'Reserved Internal Address',
+      reason: 'Unparseable or unknown IP address representation.',
+      remediation: 'Verify DNS record validity.',
+    };
+  }
+
+  const clean = ip.trim().toLowerCase();
+
+  // 1. Loopback addresses (127.0.0.0/8, ::1, 0:0:0:0:0:0:0:1)
+  if (
+    clean === '127.0.0.1' ||
+    clean.startsWith('127.') ||
+    clean === '::1' ||
+    clean === '0:0:0:0:0:0:0:1' ||
+    clean === '::ffff:127.0.0.1' ||
+    clean === '::ffff:7f00:1'
+  ) {
+    return {
+      severity: 'INFO',
+      title: 'Localhost / Loopback Mapping',
+      reason: 'Subdomain maps to loopback interface. Often deliberate for local development, split-horizon routing, or desktop client sync (e.g. localhost.target.com -> 127.0.0.1).',
+      remediation: 'Ensure loopback mapping is intentional and does not expose local services to cross-origin abuse.',
+    };
+  }
+
+  // 2. Cloud Instance Metadata Service (IMDS) & Link-Local (169.254.0.0/16, fe80::/10)
+  if (
+    clean.startsWith('169.254.') ||
+    clean === '::ffff:169.254.169.254' ||
+    clean.startsWith('fe8') ||
+    clean.startsWith('fe9') ||
+    clean.startsWith('fea') ||
+    clean.startsWith('feb')
+  ) {
+    return {
+      severity: 'HIGH',
+      title: 'Link-Local / Cloud IMDS Mapping',
+      reason: 'Subdomain resolves to link-local or Cloud Instance Metadata Service (IMDS) range (169.254.169.254). Potential SSRF jump-point if requested by cloud workloads.',
+      remediation: 'Remove link-local or IMDS IP mappings from public DNS zones immediately.',
+    };
+  }
+
+  // 3. RFC 1918 Private Ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) & IPv6 ULA (fc00::/7 - fc.. and fd..)
+  if (
+    clean.startsWith('10.') ||
+    clean.startsWith('192.168.') ||
+    clean.startsWith('fc') ||
+    clean.startsWith('fd')
+  ) {
+    return {
+      severity: 'MEDIUM',
+      title: 'Internal IP Leak / RFC 1918 Exposure',
+      reason: 'Subdomain resolves to internal private network address space, disclosing internal network topology in public DNS.',
+      remediation: 'Remove internal IP mappings from public DNS zones or use split-horizon DNS to keep private IPs restricted to internal resolvers.',
+    };
+  }
+
+  // Check 172.16.0.0/12 (172.16.x.x through 172.31.x.x)
+  if (clean.startsWith('172.')) {
+    const parts = clean.split('.');
+    const second = parseInt(parts[1], 10);
+    if (!isNaN(second) && second >= 16 && second <= 31) {
+      return {
+        severity: 'MEDIUM',
+        title: 'Internal IP Leak / RFC 1918 Exposure',
+        reason: 'Subdomain resolves to internal RFC 1918 address space (172.16.0.0/12), disclosing internal network topology in public DNS.',
+        remediation: 'Remove internal IP mappings from public DNS zones or use split-horizon DNS.',
+      };
+    }
+  }
+
+  // 4. Carrier-Grade NAT (CGNAT) 100.64.0.0/10 (100.64.0.0 - 100.127.255.255)
+  if (clean.startsWith('100.')) {
+    const parts = clean.split('.');
+    const second = parseInt(parts[1], 10);
+    if (!isNaN(second) && second >= 64 && second <= 127) {
+      return {
+        severity: 'LOW',
+        title: 'Carrier-Grade NAT Address (RFC 6598)',
+        reason: 'Subdomain maps to shared address space used by telecommunication providers and CGNAT infrastructure.',
+        remediation: 'Review DNS configuration to confirm whether shared carrier address allocation is intentional.',
+      };
+    }
+  }
+
+  // 5. Multicast / Broadcast / Reserved (224.0.0.0/4, 240.0.0.0/4, 0.0.0.0/8, ff00::/8, 255.255.255.255)
+  if (
+    clean.startsWith('0.') ||
+    clean.startsWith('224.') ||
+    clean.startsWith('240.') ||
+    clean.startsWith('ff') ||
+    clean === '255.255.255.255' ||
+    clean === '::'
+  ) {
+    return {
+      severity: 'LOW',
+      title: 'Reserved / Multicast IP Address',
+      reason: 'Subdomain resolves to multicast, broadcast, or IETF reserved address range.',
+      remediation: 'Update DNS record to point to a valid public unicast IP address.',
+    };
+  }
+
+  return {
+    severity: 'LOW',
+    title: 'Reserved Internal Address',
+    reason: 'Subdomain resolves to a reserved internal network address.',
+    remediation: 'Update DNS record to point to a valid public IP address.',
+  };
+}
+
 // Active Host Prober with Dual IPv4/IPv6, Real DNS Latency, and SSRF Defense
 async function probeLiveHost(subdomain) {
   let ip4 = null;
@@ -799,21 +1021,23 @@ async function probeLiveHost(subdomain) {
   const primaryIp = ip4 || ip6;
   const category = categorizeSubdomain(subdomain);
 
-  // SSRF Pre-check: Internal IPs showing up in public DNS are reportable findings (RFC 1918 exposure)
+  // SSRF Pre-check: Internal IPs showing up in public DNS are reportable findings
   if (primaryIp && isPrivateOrReservedIp(primaryIp)) {
+    const ipRisk = classifyIpRisk(primaryIp);
     return {
       url: `http://${subdomain}`,
       subdomain,
       statusCode: 0,
-      title: 'Internal IP / RFC 1918 Exposure',
+      title: ipRisk.title,
       latencyMs: dnsTime,
       ip: primaryIp,
       ipv6: ip6,
       category: 'internal-leak',
-      techStack: ['Internal IP (SSRF Blocked)'],
+      techStack: [`${ipRisk.title} (SSRF Blocked)`],
       takeoverRisk: null,
       ssrfBlocked: true,
       internalLeak: true,
+      ipRisk,
     };
   }
 
@@ -856,19 +1080,21 @@ async function probeLiveHost(subdomain) {
       };
     } catch (err) {
       if (err.code === 'ERR_SSRF_BLOCKED' || (err.message && err.message.includes('SSRF blocked'))) {
+        const ipRisk = classifyIpRisk(primaryIp);
         return {
           url: targetUrl,
           subdomain,
           statusCode: 0,
-          title: 'Internal IP / RFC 1918 Exposure',
+          title: ipRisk.title,
           latencyMs: 0,
           ip: primaryIp,
           ipv6: ip6,
           category: 'internal-leak',
-          techStack: ['Internal IP (SSRF Blocked via Rebinding Protection)'],
+          techStack: [`${ipRisk.title} (SSRF Blocked via Rebinding Protection)`],
           takeoverRisk: null,
           ssrfBlocked: true,
           internalLeak: true,
+          ipRisk,
         };
       }
       // try next protocol
@@ -1143,11 +1369,11 @@ Status          : SUCCESS
 
 // API Routes
 app.post('/api/recon/start', async (req, res) => {
-  // Session token validation prevents Cross-Origin Scanner Hijacking
-  const clientToken = req.headers['x-reconforge-session'] || req.body?.sessionToken || req.query?.token;
-  if (!clientToken || clientToken !== SESSION_TOKEN) {
+  // Session token validation strictly via header prevents Cross-Origin Scanner Hijacking
+  const clientToken = req.headers['x-reconforge-session'];
+  if (!isTokenValid(clientToken)) {
     return res.status(403).json({
-      error: 'Forbidden: Missing or invalid session token. Scanner hijacking protection active.',
+      error: 'Forbidden: Missing or invalid x-reconforge-session header. Scanner hijacking protection active.',
     });
   }
 
@@ -1190,6 +1416,7 @@ app.post('/api/recon/start', async (req, res) => {
     scanData.status = 'failed';
     scanData.error = err?.message || 'Workflow execution error';
     appendLog(scanData, `\x1b[31m[ERROR] Scan failed: ${scanData.error}\x1b[0m`);
+    broadcastScanUpdate(scanData.id, scanData);
   });
 
   return res.json({ scanId, domain, status: 'running' });
@@ -1197,7 +1424,12 @@ app.post('/api/recon/start', async (req, res) => {
 
 app.get('/api/recon/stream/:scanId', (req, res) => {
   const { scanId } = req.params;
-  const scan = scans.get(scanId);
+  const token = req.headers['x-reconforge-session'] || req.query?.token;
+  if (token && !isTokenValid(token)) {
+    return res.status(403).json({ error: 'Forbidden: Invalid session token' });
+  }
+
+  const scan = getScan(scanId);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -1217,6 +1449,7 @@ app.get('/api/recon/stream/:scanId', (req, res) => {
   }
   clientList.push(res);
 
+  // Send initial full scan state upon connection
   res.write(`data: ${JSON.stringify(scan)}\n\n`);
 
   req.on('close', () => {
@@ -1227,12 +1460,22 @@ app.get('/api/recon/stream/:scanId', (req, res) => {
 
 app.get('/api/recon/scan/:scanId', (req, res) => {
   const { scanId } = req.params;
-  const scan = scans.get(scanId);
+  const token = req.headers['x-reconforge-session'] || req.query?.token;
+  if (token && !isTokenValid(token)) {
+    return res.status(403).json({ error: 'Forbidden: Invalid session token' });
+  }
+
+  const scan = getScan(scanId);
   if (!scan) return res.status(404).json({ error: 'Scan not found' });
   return res.json(scan);
 });
 
-app.get('/api/recon/history', (_req, res) => {
+app.get('/api/recon/history', (req, res) => {
+  const token = req.headers['x-reconforge-session'] || req.query?.token;
+  if (token && !isTokenValid(token)) {
+    return res.status(403).json({ error: 'Forbidden: Invalid session token' });
+  }
+
   const list = Array.from(scans.values()).map(s => ({
     id: s.id,
     domain: s.domain,
@@ -1248,7 +1491,12 @@ app.get('/api/recon/history', (_req, res) => {
 
 app.get('/api/recon/download/:scanId/:fileType', (req, res) => {
   const { scanId, fileType } = req.params;
-  const scan = scans.get(scanId);
+  const token = req.headers['x-reconforge-session'] || req.query?.token;
+  if (token && !isTokenValid(token)) {
+    return res.status(403).send('Forbidden: Invalid session token');
+  }
+
+  const scan = getScan(scanId);
   if (!scan) return res.status(404).send('Scan not found');
 
   switch (fileType) {
@@ -1281,6 +1529,8 @@ app.get('/api/recon/download/:scanId/:fileType', (req, res) => {
       return res.status(400).send('Invalid file type');
   }
 });
+
+export { app };
 
 async function startServer() {
   if (!isProd) {
