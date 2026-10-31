@@ -7,8 +7,8 @@
   }
 
   body {
-    background-color: #08090d;
-    color: #e2e8f0;
+    background-color: #0e1017;
+    color: #f1f5f9;
     font-family: var(--font-sans);
     letter-spacing: -0.01em;
   }
@@ -18,23 +18,6 @@
   }
 }
 
-/* Subtle tactical grid background */
-.tactical-grid {
-  background-size: 32px 32px;
-  background-image: 
-    linear-gradient(to right, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
-}
-
-/* Micro-scanline texture */
-.scanline {
-  background: linear-gradient(
-    rgba(18, 16, 16, 0) 50%, 
-    rgba(0, 0, 0, 0.25) 50%
-  );
-  background-size: 100% 4px;
-}
-
 /* Custom performance-tuned scrollbars */
 ::-webkit-scrollbar {
   width: 6px;
@@ -42,44 +25,39 @@
 }
 
 ::-webkit-scrollbar-track {
-  background: #0b0d13;
+  background: #0e1017;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1e2433;
-  border-radius: 3px;
+  background: #232736;
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #2e384d;
+  background: #33394d;
 }
 
-/* Pulse animation for active radar/stream */
-@keyframes radar-pulse {
-  0% {
-    transform: scale(0.95);
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
-  }
-  70% {
-    transform: scale(1);
-    box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
-  }
-  100% {
-    transform: scale(0.95);
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
-  }
-}
-
-.animate-radar {
-  animation: radar-pulse 2s infinite cubic-bezier(0.4, 0, 0.6, 1);
+/* Subtle micro-scanline for terminal only */
+.scanline {
+  background: linear-gradient(
+    rgba(18, 16, 16, 0) 50%, 
+    rgba(0, 0, 0, 0.2) 50%
+  );
+  background-size: 100% 4px;
 }
 
 /* Smooth fade in */
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { 
+    opacity: 0; 
+    transform: translateY(6px); 
+  }
+  to { 
+    opacity: 1; 
+    transform: translateY(0); 
+  }
 }
 
 .animate-fade-in {
-  animation: fadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: fadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
