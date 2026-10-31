@@ -1,7 +1,7 @@
 {
   "name": "reconforge",
   "version": "2.0.0",
-  "description": "Passive Subdomain Recon Automation Tool v2",
+  "description": "Subdomain Reconnaissance & Active Service Probing Automation Engine",
   "type": "module",
   "scripts": {
     "dev": "node server.js",

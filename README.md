@@ -3,7 +3,7 @@
 A high-performance reconnaissance and attack surface mapping suite for security researchers, bug bounty hunters, and penetration testers.
 
 ReconForge features a **dual-engine architecture**:
-1. **Native Node.js Engine & Desktop GUI**: A standalone, zero-Go-dependency engine featuring an interactive React (JSX) dashboard, 60fps HTML5 Canvas topology graph, real-time ANSI terminal streaming via Server-Sent Events (SSE), built-in SSRF defenses, and takeover risk detection.
+1. **Native Node.js Engine & Desktop GUI**: A standalone, zero-Go-dependency engine featuring an interactive React (JSX) dashboard, 60fps HTML5 Canvas topology graph, real-time ANSI terminal streaming via Server-Sent Events (SSE), built-in SSRF defenses (`net.BlockList` + connect-time lookup), and takeover risk detection with real CNAME verification.
 2. **Classic Bash CLI Pipeline**: The original standalone script suite (`recon.sh`, `functions.sh`, `config.sh`) for headless terminal environments orchestrating standard Linux tools (`subfinder`, `assetfinder`, `httpx`).
 
 ---
@@ -14,11 +14,11 @@ ReconForge separates non-intrusive public intelligence gathering from active hos
 
 | Stage | Operation | Classification | Description |
 | :--- | :--- | :--- | :--- |
-| **01** | Scope & Wildcard Check | Active Pre-flight | Validates domain format (RFC 1035 + Punycode IDN), tests resolver connectivity, and resolves random canary labels (`_wildcard_check_<hex>.<target>`) to detect wildcard DNS zones. |
-| **02** | Certificate Transparency | Passive | Mines public TLS certificate issuance logs via `crt.sh` JSON API without sending any network traffic to the target domain. |
-| **03** | Passive Feeds & Threat Intel | Passive | Collects recorded hostnames from AlienVault OTX Passive DNS and HackerTarget search index. Bypasses dictionary guessing if wildcard DNS was detected. |
-| **04** | Normalization & Deduplication | Local Processing | Strips wildcards, normalizes casing, validates FQDN syntax, and dedupes all discovered targets. |
-| **05** | HTTP/TLS Service Probing | Active Probing | Performs dual-stack IPv4/IPv6 resolution, measures genuine DNS latency, applies strict **SSRF filters** (blocking cloud IMDS `169.254.169.254` and private subnets), tests HTTPS/HTTP responsiveness, detects web server software, extracts page titles, and analyzes dangling CNAME takeover patterns. |
+| **01** | Scope & Resolver Check | Active Pre-flight | Validates domain format (RFC 1035 + Punycode IDN) and verifies system network resolver responsiveness. |
+| **02** | Certificate Transparency | Passive | Mines public TLS certificate issuance logs via `crt.sh` JSON API (enforcing strict TLS verification and 15MB buffer) without sending any network traffic to the target domain. |
+| **03** | Passive Feeds & Threat Intel | Passive | Collects recorded hostnames from AlienVault OTX Passive DNS and HackerTarget search index. Probes random canary labels (`_wildcard_check_<hex>.<target>`) to detect wildcard DNS zones. |
+| **04** | Normalization & Wildcard Filter | Local Processing | Strips wildcards, normalizes casing, validates FQDN syntax, dedupes all discovered targets, and filters passive records that resolve exclusively to wildcard IPs. |
+| **05** | HTTP/TLS Service Probing | Active Probing | Performs dual-stack IPv4/IPv6 resolution, measures genuine DNS latency, applies **SSRF filters with connect-time DNS rebinding defense** (blocking cloud IMDS `169.254.169.254`, loopbacks, CGNAT, multicast, IPv6 ULA/link-local, and IPv4-mapped IPv6), tests HTTPS/HTTP responsiveness, detects web server software, extracts page titles, and analyzes dangling CNAME records for subdomain takeover risks. |
 | **06** | Report Compilation | Artifacts | Exports structured Markdown reports (`report.md`), summary statistics (`summary.txt`), raw target lists (`subdomains.txt`, `alive.txt`), and audit logs (`recon.log`). |
 
 ---
@@ -26,11 +26,13 @@ ReconForge separates non-intrusive public intelligence gathering from active hos
 ## Security & Threat Model
 
 Unlike basic scanners that blindly curl resolved addresses, ReconForge actively protects the host environment:
-- **SSRF & Cloud Metadata Mitigation**: Automatically intercepts queries resolving to `169.254.169.254` (AWS/GCP/Azure IMDS), loopback (`127.0.0.0/8`), and RFC 1918 subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), dropping outbound sockets before TCP handshakes occur.
-- **Wildcard DNS Flood Prevention**: Prevents false-positive dictionary floods by verifying NXDOMAIN behavior first.
-- **Untrusted TLS Resilience**: Uses an HTTPS agent with `rejectUnauthorized: false` during stage 5 so internal hosts with self-signed or expired certs are not dropped prematurely.
+- **SSRF & Cloud Metadata Mitigation**: Implements Node's native `net.BlockList` to block `169.254.169.254` (AWS/GCP/Azure IMDS), loopbacks (`127.0.0.0/8`, `::1`, `0:0:0:0:0:0:0:1`, `::`), RFC 1918 subnets, `100.64.0.0/10`, `192.0.0.0/24`, `198.18.0.0/15`, `224.0.0.0/4`, `fc00::/7`, `fe80::/10`, and IPv4-mapped IPv6 (`::ffff:`).
+- **DNS Rebinding (TOCTOU) Defense**: Connect-time DNS validation via custom `lookup` in `http.request` ensures that both `A` and `AAAA` records are validated at socket creation time before TCP handshakes occur.
+- **Differentiated TLS Verification**: Strict TLS (`rejectUnauthorized: true`) for external OSINT threat intelligence APIs to prevent on-path injection, paired with lenient TLS (`rejectUnauthorized: false`) exclusively for target host discovery to inspect self-signed or expired certificates.
+- **Wildcard DNS False-Positive Filtering**: Prevents false-positive dictionary floods and filters passive records matching wildcard IPs.
+- **Dangling CNAME Verification**: Queries DNS `CNAME` records via `dns.resolveCname` to verify cloud provider targets before reporting takeover vulnerabilities, clearly labeling unconfirmed signatures as "Possible".
 
-For in-depth analysis and the security policy, see [SECURITY.md](SECURITY.md).
+For in-depth analysis and the full threat model, see [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -40,7 +42,7 @@ For in-depth analysis and the security policy, see [SECURITY.md](SECURITY.md).
 ReconForge/
 ├── server.js               # Native Node.js engine, SSRF firewall, API routes & SSE streaming
 ├── test/
-│   └── sanity.test.js      # Unit tests for domain sanitizer, Punycode, SSRF filter, wildcard DNS
+│   └── sanity.test.js      # Unit tests for domain sanitizer, Punycode, SSRF filter, wildcard DNS, CNAME
 ├── src/
 │   ├── main.jsx            # React 19 root entry (pure JSX, no TypeScript)
 │   ├── App.jsx             # Dual-channel state manager (SSE + interval fallback)
@@ -138,8 +140,9 @@ npm test
 This verifies:
 1. `sanitizeDomain` input normalization (stripping protocols, paths, trailing ports, and query strings).
 2. `isValidDomain` RFC 1035 and Internationalized Domain Name (IDN / Punycode `xn--...`) validation.
-3. `isPrivateOrReservedIp` SSRF mitigation blocking Cloud IMDS (`169.254.169.254`), loopbacks (`127.0.0.1`), and RFC 1918 subnets while allowing valid public IPs.
-4. `detectWildcardDNS` DNS probe handling.
+3. `isPrivateOrReservedIp` SSRF mitigation blocking Cloud IMDS (`169.254.169.254`), loopbacks (`127.0.0.1`, `::1`, `0:0:0:0:0:0:0:1`, `::`), IPv6 ULA/link-local (`fc00::/7`, `fe80::/10`), multicast/benchmarks (`224.0.0.1`, `198.18.0.1`, `192.0.0.1`), and IPv4-mapped IPv6 (`::ffff:127.0.0.1`) while allowing valid public IPs.
+4. `detectWildcardDNS` offline deterministic wildcard evaluation.
+5. `checkTakeoverRisk` CNAME target verification before claiming takeover.
 
 ---
 

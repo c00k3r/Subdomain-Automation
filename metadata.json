@@ -1,8 +1,6 @@
 {
-  "name": "ReconForge - Passive Subdomain Recon",
-  "description": "Passive subdomain reconnaissance and live host detection automation tool with real-time logging, statistics, and report export.",
+  "name": "ReconForge - Subdomain Reconnaissance & Active Service Probing",
+  "description": "Subdomain reconnaissance and active service probing automation engine with real-time SSE streaming, DNS validation, and report export.",
   "permissions": [],
-  "capabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
+  "capabilities": []
 }

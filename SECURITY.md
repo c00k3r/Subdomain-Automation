@@ -1,6 +1,6 @@
 # Security Policy & Threat Model
 
-ReconForge is an automated subdomain reconnaissance and service probing tool designed for authorized penetration testing, bug bounty hunting, and attack surface management. Because network scanners actively probe target infrastructure, they inherently touch sensitive network boundaries and must defend against weaponized DNS responses, SSRF (Server-Side Request Forgery), and uncontrolled query loops.
+ReconForge is an automated subdomain reconnaissance and active service probing engine designed for authorized penetration testing, bug bounty hunting, and attack surface management. Because network scanners actively probe target infrastructure, they inherently touch sensitive network boundaries and must defend against weaponized DNS responses, SSRF (Server-Side Request Forgery), DNS rebinding, and uncontrolled query loops.
 
 ---
 
@@ -8,85 +8,60 @@ ReconForge is an automated subdomain reconnaissance and service probing tool des
 
 ### 1.1 Server-Side Request Forgery (SSRF) & Cloud IMDS Theft
 
-#### The Vulnerability
+#### The Attack Vector
 When actively probing discovered subdomains via HTTP/HTTPS (`probeLiveHost`), an adversary controlling DNS records for a target domain (or a malicious user scanning their own rogue domain) could configure a subdomain's `A` or `AAAA` record to point to:
 1. **Cloud Instance Metadata Service (IMDS)**: `169.254.169.254` (AWS EC2, GCP metadata, Azure instance metadata).
-2. **Local Loopback**: `127.0.0.1` or `127.0.0.0/8`, `::1`.
-3. **Internal RFC 1918 Subnets**: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`.
-
-#### Execution Trace Without Protection
-If a target subdomain `rogue.target.com` resolves to `169.254.169.254`:
-1. `dns.resolve4('rogue.target.com')` returns `['169.254.169.254']`.
-2. Without pre-flight validation, `safeHttpRequest('https://rogue.target.com')` initiates a TCP handshake to `169.254.169.254:443` or `http://169.254.169.254:80`.
-3. If deployed on AWS/GCP, the scanner's Node.js process could inadvertently read instance IAM credentials, service account tokens, or project metadata and surface them in the UI response body or logs.
+2. **Local Loopback**: `127.0.0.1` or `127.0.0.0/8`, `::1`, `0:0:0:0:0:0:0:1`, `::`.
+3. **Internal RFC 1918 & Reserved Subnets**: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (CGNAT), `0.0.0.0/8`, `192.0.0.0/24`, `198.18.0.0/15`, `224.0.0.0/4` (Multicast), `240.0.0.0/4`.
+4. **IPv6 Private & Link-Local Ranges**: `fc00::/7` (Unique Local Addresses), `fe80::/10` (Link-Local Unicast), `ff00::/8` (Multicast).
+5. **IPv4-Mapped IPv6 Bypasses**: `::ffff:127.0.0.1`, `::ffff:169.254.169.254`, or hex equivalents (`::ffff:7f00:0001`).
 
 #### ReconForge Mitigation
-Before any HTTP/HTTPS socket is opened, ReconForge executes `isPrivateOrReservedIp(primaryIp)`:
-```javascript
-// SSRF Safeguard in probeLiveHost (server.js)
-if (primaryIp && isPrivateOrReservedIp(primaryIp)) {
-  return {
-    url: `http://${subdomain}`,
-    subdomain,
-    statusCode: 0,
-    latencyMs: dnsTime,
-    ip: primaryIp,
-    category: 'internal',
-    techStack: ['Internal IP (SSRF Blocked)'],
-    ssrfBlocked: true,
-  };
-}
-```
-All outbound socket connections to `169.254.0.0/16`, `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, and IPv6 `::1`/`fe80::/10` are dropped before request dispatch.
+ReconForge implements a defense-in-depth architecture using Node.js's native `net.BlockList`:
+1. **Subnet Parsing & Normalization**: Address strings are parsed and evaluated directly against binary CIDR subnets rather than naive prefix string matching. IPv4-mapped IPv6 addresses (`::ffff:`) are automatically unmapped and evaluated against IPv4 rules.
+2. **Connect-Time DNS Rebinding Defense**: To eliminate the check-then-use (TOCTOU) gap where a DNS server might return a public IP during pre-check and `127.0.0.1` during the socket connection, `safeHttpRequest` passes a custom `lookup` function directly to `http.request` / `https.request`. Every resolved `A` and `AAAA` address is validated at socket establishment time. If any address falls within the blocklist, the connection is aborted immediately (`ERR_SSRF_BLOCKED`) before any TCP SYN or TLS handshake.
 
 ---
 
-### 1.2 Wildcard DNS False-Positive Cascades
+### 1.2 Differentiated TLS Verification Policy
+
+- **Strict TLS for OSINT Intelligence APIs**: When querying external threat intelligence APIs (`crt.sh`, `AlienVault OTX`, `HackerTarget`), ReconForge enforces strict TLS verification (`rejectUnauthorized: true`). This prevents on-path man-in-the-middle attackers from injecting fraudulent subdomains into your assessment pipeline.
+- **Lenient TLS for Target Probing**: When actively probing target services, ReconForge configures the probe client with `rejectUnauthorized: false`. Valid target applications with self-signed, staging, or expired certificates are accurately discovered and fingerprinted without prematurely dropping the asset.
+
+---
+
+### 1.3 Wildcard DNS Handling & False-Positive Elimination
 
 #### The Vulnerability
-If an organization configures a wildcard DNS record (`*.target.com IN A 192.0.2.1`), any query for a non-existent subdomain (e.g. `nonexistent123.target.com`) resolves successfully. 
-
-When a scanner runs a dictionary of common prefixes (e.g. `admin`, `api`, `vpn`, `dev`, `portal`), all 25+ prefixes return positive resolutions. Without wildcard detection, the scanner pollutes the attack surface with 25 false-positive entries and fires unnecessary HTTP probes at the same wildcard web server.
+If an organization configures a wildcard DNS record (`*.target.com IN A 192.0.2.1`), queries for non-existent subdomains resolve successfully. Without wildcard handling, common prefix dictionary guessing returns 100% false positives, and passive DNS hits under the wildcard zone flood the results with identical IPs.
 
 #### ReconForge Mitigation
-Before resolving dictionary prefixes, ReconForge executes an automated pre-flight probe using a cryptographically randomized label:
-```javascript
-export async function detectWildcardDNS(domain) {
-  const randomSuffix = crypto.randomBytes(4).toString('hex');
-  const testHost = `_wildcard_check_${randomSuffix}.${domain}`;
-  try {
-    const ips = await dns.resolve4(testHost);
-    if (ips && ips.length > 0) {
-      return { hasWildcard: true, wildcardIps: ips };
-    }
-  } catch {
-    // Expected NXDOMAIN
-  }
-  return { hasWildcard: false, wildcardIps: [] };
-}
-```
-If the wildcard probe resolves, dictionary guessing is automatically bypassed, a clear audit notice is logged in the UI terminal, and only legitimate passive records are retained.
+1. **Automated Wildcard Pre-Check**: Before dictionary resolution, ReconForge tests a cryptographically randomized label (`_wildcard_check_<random>.<domain>`).
+2. **Dictionary Bypass**: If a wildcard record is detected, high-frequency prefix guessing is bypassed automatically.
+3. **Passive Hit Filtering**: Passive records collected from certificate logs and OSINT feeds are resolved against the detected wildcard IP set. Records that resolve exclusively to wildcard IPs are filtered to ensure only verified, distinct services are probed.
 
 ---
 
-### 1.3 Localhost Binding & Cross-Origin Safety
+### 1.4 Dangling CNAME Takeover Verification
 
-- **Local Host Binding**: When operated in desktop app mode, the Node.js server binds to `127.0.0.1` by default to prevent unauthorized network neighbors on shared Wi-Fi from querying local scans.
-- **Strict Domain Validation**: Input domains are normalized and validated against RFC 1035 format and internationalized Punycode labels (`xn--...`), preventing command injection or directory traversal in report paths.
+ReconForge actively resolves DNS `CNAME` records using `dns.resolveCname` for candidate subdomains.
+- **Confirmed Vulnerability**: If a subdomain's CNAME record explicitly points to an external cloud provider (e.g. `*.github.io`, `*.s3.amazonaws.com`, `*.herokudns.com`, `*.zendesk.com`, `*.myshopify.com`) AND the HTTP response matches the unclaimed service error signature, it is reported as a confirmed takeover risk with remediation steps.
+- **Unconfirmed / Possible Risk**: If the HTTP response body matches an error signature but no CNAME record is resolved (or does not point to the expected provider domain), it is labeled honestly as "Possible" with a reduced severity rating.
 
 ---
 
-### 1.4 TLS Handshake Resilience
+### 1.5 Host Binding, CORS Origin Lockdown & DoS Prevention
 
-Security auditors routinely encounter internal services with self-signed, expired, or hostname-mismatched SSL/TLS certificates. Standard HTTP clients reject these connections with `ERR_TLS_CERT_ALTNAME_INVALID` or `DEPTH_ZERO_SELF_SIGNED_CERT`, prematurely dropping valid active web assets.
-
-ReconForge uses an HTTPS agent configured with `rejectUnauthorized: false` exclusively for asset discovery, ensuring valid servers with outdated certs are surfaced while strictly retaining SSRF IP blocking.
+- **Host Binding**: Configurable via `process.env.HOST` (defaults to `0.0.0.0` in containerized/preview environments, configurable to `127.0.0.1` for standalone local deployment).
+- **Strict CORS Policy**: CORS origins are restricted to local addresses (`localhost`, `127.0.0.1`) and authorized preview origins. Unauthorized cross-origin requests from arbitrary websites are rejected.
+- **Bounded Request Limits & Deadlines**: Every HTTP request in `safeHttpRequest` enforces an overall deadline timer (with `req.destroy()`) and per-call response byte limits (`maxBytes`: 15MB for large Certificate Transparency JSON, 150KB for live host HTML inspection) to prevent slowloris dripping attacks and out-of-memory crashes.
+- **Scan History Eviction**: In-memory scan state is capped at 30 entries using bounded LRU eviction to prevent memory exhaustion during long-running sessions.
 
 ---
 
 ## 2. Responsible Disclosure Policy
 
-If you discover a vulnerability within ReconForge:
+If you discover a security vulnerability within ReconForge:
 1. Please report it privately by opening a security advisory or contacting the maintainer directly.
 2. Provide a reproduction script or proof of concept.
 3. We will respond within 48 hours and work with you on a coordinated fix.
@@ -95,4 +70,4 @@ If you discover a vulnerability within ReconForge:
 
 ## 3. Permitted & Authorized Use
 
-ReconForge sends active network requests (DNS queries and HTTP/HTTPS GET requests) during stage 5. **You must only scan domain names you own or have explicit written permission to assess under an authorized bug bounty program or penetration testing engagement.**
+ReconForge performs active network requests (DNS queries and HTTP/HTTPS GET requests) during stage 5. **You must only scan domain names you own or have explicit written permission to assess under an authorized bug bounty program or penetration testing engagement.**
