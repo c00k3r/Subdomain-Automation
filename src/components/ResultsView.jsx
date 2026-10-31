@@ -12,13 +12,17 @@ import {
   Clock,
   RotateCcw,
   ShieldCheck,
-  Share2
+  Layers,
+  AlertTriangle,
+  Server
 } from 'lucide-react';
 import { TerminalLog } from './TerminalLog';
 import { ReportsViewer } from './ReportsViewer';
+import { TopologyGraph } from './TopologyGraph';
+import { RiskScanner } from './RiskScanner';
 
-export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
-  const [activeTab, setActiveTab] = useState(defaultTab); // 'reports' | 'alive' | 'all' | 'terminal'
+export const ResultsView = ({ scan, onNewScan, defaultTab = 'topology' }) => {
+  const [activeTab, setActiveTab] = useState(defaultTab); // 'topology' | 'alive' | 'risk' | 'all' | 'reports' | 'terminal'
   const [copiedUrl, setCopiedUrl] = useState(null);
   const [search, setSearch] = useState('');
   const [copiedAll, setCopiedAll] = useState(false);
@@ -31,11 +35,11 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
   const filteredAlive = aliveHosts.filter((h) => {
     if (!search) return true;
     const q = search.toLowerCase();
-    return (
-      h.url.toLowerCase().includes(q) ||
-      (h.title || '').toLowerCase().includes(q) ||
-      (h.ip || '').toLowerCase().includes(q)
-    );
+    const matchUrl = h.url.toLowerCase().includes(q);
+    const matchTitle = (h.title || '').toLowerCase().includes(q);
+    const matchIp = (h.ip || '').toLowerCase().includes(q);
+    const matchTech = (h.techStack || []).some((t) => t.toLowerCase().includes(q));
+    return matchUrl || matchTitle || matchIp || matchTech;
   });
 
   const filteredSubs = allSubdomains.filter((s) => {
@@ -56,17 +60,17 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
   };
 
   return (
-    <div className="max-w-5xl mx-auto py-6 px-4 space-y-6 animate-fade-in">
+    <div className="max-w-6xl mx-auto py-6 px-4 space-y-5 animate-fade-in">
       {/* Top Results Summary Bar */}
       <div className="bg-[#161822] border border-[#262b3b] rounded-2xl p-5 sm:p-6 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-5">
         <div className="space-y-1.5">
           <div className="inline-flex items-center space-x-1.5 text-xs font-semibold text-emerald-400">
             <ShieldCheck className="w-4 h-4" />
-            <span>Scan Completed Successfully</span>
+            <span>Reconnaissance Complete</span>
           </div>
 
           <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight flex items-center space-x-2">
-            <span>Results for</span>
+            <span>Target:</span>
             <span className="text-indigo-400 font-mono">{scan.domain}</span>
           </h2>
 
@@ -106,11 +110,23 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
         </div>
       </div>
 
-      {/* Clean Tab Bar */}
-      <div className="flex border-b border-[#232733] space-x-2 overflow-x-auto text-sm font-medium">
+      {/* Clean Tab Bar with Visual Icons */}
+      <div className="flex border-b border-[#232733] space-x-1 sm:space-x-2 overflow-x-auto text-xs sm:text-sm font-medium">
+        <button
+          onClick={() => setActiveTab('topology')}
+          className={`pb-3 px-3 sm:px-4 flex items-center space-x-2 border-b-2 whitespace-nowrap transition-colors ${
+            activeTab === 'topology'
+              ? 'border-indigo-500 text-white font-semibold'
+              : 'border-transparent text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Layers className="w-4 h-4 text-indigo-400" />
+          <span>Topology Graph</span>
+        </button>
+
         <button
           onClick={() => { setActiveTab('alive'); setSearch(''); }}
-          className={`pb-3 px-4 flex items-center space-x-2 border-b-2 transition-colors ${
+          className={`pb-3 px-3 sm:px-4 flex items-center space-x-2 border-b-2 whitespace-nowrap transition-colors ${
             activeTab === 'alive'
               ? 'border-indigo-500 text-white font-semibold'
               : 'border-transparent text-slate-400 hover:text-slate-200'
@@ -121,20 +137,32 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
         </button>
 
         <button
+          onClick={() => setActiveTab('risk')}
+          className={`pb-3 px-3 sm:px-4 flex items-center space-x-2 border-b-2 whitespace-nowrap transition-colors ${
+            activeTab === 'risk'
+              ? 'border-amber-500 text-white font-semibold'
+              : 'border-transparent text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <AlertTriangle className="w-4 h-4 text-amber-400" />
+          <span>Risk & HVTs</span>
+        </button>
+
+        <button
           onClick={() => { setActiveTab('all'); setSearch(''); }}
-          className={`pb-3 px-4 flex items-center space-x-2 border-b-2 transition-colors ${
+          className={`pb-3 px-3 sm:px-4 flex items-center space-x-2 border-b-2 whitespace-nowrap transition-colors ${
             activeTab === 'all'
               ? 'border-indigo-500 text-white font-semibold'
               : 'border-transparent text-slate-400 hover:text-slate-200'
           }`}
         >
-          <Globe className="w-4 h-4 text-indigo-400" />
+          <Globe className="w-4 h-4 text-cyan-400" />
           <span>All Subdomains ({allSubdomains.length})</span>
         </button>
 
         <button
           onClick={() => setActiveTab('reports')}
-          className={`pb-3 px-4 flex items-center space-x-2 border-b-2 transition-colors ${
+          className={`pb-3 px-3 sm:px-4 flex items-center space-x-2 border-b-2 whitespace-nowrap transition-colors ${
             activeTab === 'reports'
               ? 'border-indigo-500 text-white font-semibold'
               : 'border-transparent text-slate-400 hover:text-slate-200'
@@ -146,18 +174,23 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
 
         <button
           onClick={() => setActiveTab('terminal')}
-          className={`pb-3 px-4 flex items-center space-x-2 border-b-2 transition-colors ${
+          className={`pb-3 px-3 sm:px-4 flex items-center space-x-2 border-b-2 whitespace-nowrap transition-colors ${
             activeTab === 'terminal'
               ? 'border-indigo-500 text-white font-semibold'
               : 'border-transparent text-slate-400 hover:text-slate-200'
           }`}
         >
           <Terminal className="w-4 h-4 text-slate-400" />
-          <span>Terminal Output</span>
+          <span>Terminal Log</span>
         </button>
       </div>
 
-      {/* TAB 1: Live Websites Cards */}
+      {/* TAB 1: Visual Topology Graph */}
+      {activeTab === 'topology' && (
+        <TopologyGraph scan={scan} />
+      )}
+
+      {/* TAB 2: Live Websites with Tech Stack Fingerprints */}
       {activeTab === 'alive' && (
         <div className="space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -167,14 +200,14 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search live hosts, titles, or IP..."
-                className="w-full pl-9 pr-3 py-2 bg-[#161822] border border-[#262b3b] rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                placeholder="Search hosts, titles, IP, or tech (e.g. Nginx, Cloudflare)..."
+                className="w-full pl-9 pr-3 py-2 bg-[#161822] border border-[#262b3b] rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono"
               />
             </div>
 
             <a
               href={`/api/recon/download/${scan.id}/alive`}
-              className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center space-x-1.5 self-start sm:self-center"
+              className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center space-x-1.5 self-start sm:self-center font-mono"
               download
             >
               <Download className="w-3.5 h-3.5" />
@@ -183,8 +216,8 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
           </div>
 
           {filteredAlive.length === 0 ? (
-            <div className="p-12 text-center text-slate-500 bg-[#161822] border border-[#262b3b] rounded-2xl text-sm">
-              No live websites found matching your search.
+            <div className="p-12 text-center text-slate-500 bg-[#161822] border border-[#262b3b] rounded-2xl text-sm font-mono">
+              // No live websites match your filter.
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
@@ -193,11 +226,19 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
                   key={idx}
                   className="p-4 rounded-xl bg-[#161822] border border-[#262b3b] hover:border-slate-700 transition-all space-y-3 flex flex-col justify-between"
                 >
-                  <div className="space-y-1.5">
+                  <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                        {host.statusCode ? `${host.statusCode} OK` : 'DNS Active'}
-                      </span>
+                      <div className="flex items-center space-x-1.5">
+                        <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                          {host.statusCode ? `${host.statusCode} OK` : 'DNS Active'}
+                        </span>
+                        {host.takeoverRisk && host.takeoverRisk.isVulnerable && (
+                          <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                            Takeover Risk
+                          </span>
+                        )}
+                      </div>
+
                       <span className="text-[11px] text-slate-500 font-mono">
                         {host.latencyMs}ms
                       </span>
@@ -218,6 +259,20 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
                         "{host.title}"
                       </p>
                     )}
+
+                    {/* Detected Tech Stack Badges */}
+                    {host.techStack && host.techStack.length > 0 && (
+                      <div className="flex flex-wrap gap-1 pt-1">
+                        {host.techStack.map((tech, i) => (
+                          <span
+                            key={i}
+                            className="px-2 py-0.5 rounded-md bg-[#0e1017] text-indigo-300 border border-[#262b3b] text-[10px] font-mono font-medium"
+                          >
+                            {tech}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   <div className="pt-2 border-t border-[#202533] flex items-center justify-between text-xs text-slate-500">
@@ -227,7 +282,7 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
 
                     <button
                       onClick={() => handleCopy(host.url, `host_${idx}`)}
-                      className="flex items-center space-x-1 text-slate-400 hover:text-white px-2 py-1 rounded bg-[#0e1017] border border-[#202533] text-[11px]"
+                      className="flex items-center space-x-1 text-slate-400 hover:text-white px-2 py-1 rounded bg-[#0e1017] border border-[#202533] text-[11px] font-mono"
                     >
                       {copiedUrl === `host_${idx}` ? (
                         <>
@@ -249,7 +304,12 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
         </div>
       )}
 
-      {/* TAB 2: All Subdomains List */}
+      {/* TAB 3: Risk & High-Value Targets Scanner */}
+      {activeTab === 'risk' && (
+        <RiskScanner scan={scan} />
+      )}
+
+      {/* TAB 4: All Subdomains List */}
       {activeTab === 'all' && (
         <div className="bg-[#161822] border border-[#262b3b] rounded-2xl overflow-hidden shadow-xl">
           <div className="p-4 border-b border-[#232733] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -260,14 +320,14 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Filter subdomains..."
-                className="w-full pl-9 pr-3 py-2 bg-[#0e1017] border border-[#262b3b] rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                className="w-full pl-9 pr-3 py-2 bg-[#0e1017] border border-[#262b3b] rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono"
               />
             </div>
 
             <div className="flex items-center space-x-2">
               <button
                 onClick={handleCopyAllSubs}
-                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-300 hover:text-white bg-[#0e1017] border border-[#262b3b] flex items-center space-x-1.5 transition-colors"
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-300 hover:text-white bg-[#0e1017] border border-[#262b3b] flex items-center space-x-1.5 transition-colors font-mono"
               >
                 {copiedAll ? (
                   <>
@@ -284,7 +344,7 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
 
               <a
                 href={`/api/recon/download/${scan.id}/subdomains`}
-                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-indigo-400 hover:text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 flex items-center space-x-1.5 transition-colors"
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-indigo-400 hover:text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 flex items-center space-x-1.5 transition-colors font-mono"
                 download
               >
                 <Download className="w-3.5 h-3.5" />
@@ -342,16 +402,16 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
         </div>
       )}
 
-      {/* TAB 3: Reports & Artifacts */}
+      {/* TAB 5: Reports & Artifacts */}
       {activeTab === 'reports' && (
         <ReportsViewer scan={scan} />
       )}
 
-      {/* TAB 4: Raw Terminal Output */}
+      {/* TAB 6: Raw Terminal Output */}
       {activeTab === 'terminal' && (
         <div className="space-y-3">
-          <div className="text-xs text-slate-400">
-            Raw output log from the 6-step reconnaissance pipeline:
+          <div className="text-xs text-slate-400 font-mono">
+            // Raw output log from the 6-step reconnaissance pipeline:
           </div>
           <TerminalLog logs={scan.logs || []} isScanning={false} />
         </div>

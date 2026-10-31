@@ -164,6 +164,112 @@ async function resolveCommonSubdomains(domain) {
   return found;
 }
 
+// Classify subdomain by attack surface category
+function categorizeSubdomain(subdomain) {
+  const s = subdomain.toLowerCase();
+  if (/(?:^|\.)(?:auth|login|sso|vpn|portal|identity|keycloak|okta|access|idp)(?:\.|$)/.test(s)) {
+    return 'auth';
+  }
+  if (/(?:^|\.)(?:api|v[0-9]|graphql|gateway|rest|grpc|backend|services?)(?:\.|$)/.test(s)) {
+    return 'api';
+  }
+  if (/(?:^|\.)(?:dev|staging|stage|test|qa|internal|corp|uat|sandbox|demo|preprod)(?:\.|$)/.test(s)) {
+    return 'staging';
+  }
+  if (/(?:^|\.)(?:s3|cdn|assets|static|storage|bucket|media|img)(?:\.|$)/.test(s)) {
+    return 'cloud';
+  }
+  return 'general';
+}
+
+// Fingerprint tech stack from response headers and body
+function fingerprintTechStack(res, body = '') {
+  const tech = new Set();
+  const server = (res.headers.get('server') || '').toLowerCase();
+  const poweredBy = (res.headers.get('x-powered-by') || '').toLowerCase();
+  const via = (res.headers.get('via') || '').toLowerCase();
+
+  // CDN & Cloud Detection
+  if (res.headers.get('cf-ray') || server.includes('cloudflare')) tech.add('Cloudflare');
+  if (res.headers.get('x-amz-cf-id') || via.includes('cloudfront')) tech.add('AWS CloudFront');
+  if (res.headers.get('x-fastly-request-id') || server.includes('fastly')) tech.add('Fastly');
+  if (server.includes('akamai') || res.headers.get('x-akamai-transformed')) tech.add('Akamai');
+  if (server.includes('vercel') || res.headers.get('x-vercel-id')) tech.add('Vercel');
+  if (server.includes('netlify')) tech.add('Netlify');
+  if (server.includes('gws') || server.includes('google')) tech.add('Google Cloud');
+  if (server.includes('github') || res.headers.get('x-github-request-id')) tech.add('GitHub Pages');
+
+  // Web Servers
+  if (server.includes('nginx')) {
+    const m = server.match(/nginx(?:\/([\d.]+))?/i);
+    tech.add(m && m[1] ? `Nginx ${m[1]}` : 'Nginx');
+  }
+  if (server.includes('apache')) tech.add('Apache');
+  if (server.includes('caddy')) tech.add('Caddy');
+  if (server.includes('envoy')) tech.add('Envoy');
+  if (server.includes('iis')) tech.add('Microsoft IIS');
+
+  // Frameworks & Languages
+  if (poweredBy.includes('express')) tech.add('Express.js');
+  if (poweredBy.includes('php')) tech.add('PHP');
+  if (poweredBy.includes('asp.net')) tech.add('ASP.NET');
+  if (poweredBy.includes('next.js')) tech.add('Next.js');
+
+  // Body keywords
+  if (body.includes('wp-content')) tech.add('WordPress');
+  if (body.includes('__next')) tech.add('Next.js');
+  if (body.includes('react')) tech.add('React');
+
+  return Array.from(tech);
+}
+
+// Subdomain Takeover Signature Check
+function checkTakeoverRisk(res, body = '', subdomain = '') {
+  const status = res.status;
+  const b = body.toLowerCase();
+  
+  if (status === 404) {
+    if (b.includes("there isn't a github pages site here") || b.includes('for root urls (like http://example.com/) you must provide an index.html file')) {
+      return {
+        isVulnerable: true,
+        service: 'GitHub Pages',
+        severity: 'HIGH',
+        reason: 'Dangling CNAME points to unclaimed GitHub Pages repository.',
+        remediation: 'Claim the GitHub Pages repo or remove the stale DNS CNAME entry.',
+      };
+    }
+    if (b.includes('the specified bucket does not exist') || b.includes('nosuchbucket')) {
+      return {
+        isVulnerable: true,
+        service: 'Amazon S3',
+        severity: 'CRITICAL',
+        reason: 'Dangling CNAME points to deleted or unregistered S3 bucket.',
+        remediation: 'Create the S3 bucket in your AWS account or delete the CNAME record.',
+      };
+    }
+    if (b.includes('herokucdn.com') || b.includes('no such app') || b.includes('item not found')) {
+      return {
+        isVulnerable: true,
+        service: 'Heroku',
+        severity: 'HIGH',
+        reason: 'Dangling CNAME points to released Heroku application.',
+        remediation: 'Claim the Heroku app name or remove DNS record.',
+      };
+    }
+    if (b.includes('help center closed') || b.includes('no such sub-domain')) {
+      return {
+        isVulnerable: true,
+        service: 'Zendesk',
+        severity: 'MEDIUM',
+        reason: 'Unclaimed Zendesk helpdesk CNAME.',
+        remediation: 'Claim Zendesk pod or remove CNAME.',
+      };
+    }
+  }
+
+  return null;
+}
+
 // Check live host probe (Httpx simulation)
 async function probeLiveHost(subdomain) {
   let ip;
@@ -174,7 +280,9 @@ async function probeLiveHost(subdomain) {
     // Can still probe HTTP directly
   }
 
+  const category = categorizeSubdomain(subdomain);
   const protocols = ['https://', 'http://'];
+
   for (const protocol of protocols) {
     const targetUrl = `${protocol}${subdomain}`;
     const start = Date.now();
@@ -183,9 +291,10 @@ async function probeLiveHost(subdomain) {
       const latencyMs = Date.now() - start;
       let title = '';
       const server = res.headers.get('server') || undefined;
+      let html = '';
 
       try {
-        const html = await res.text();
+        html = await res.text();
         const match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
         if (match && match[1]) {
           title = match[1].trim().slice(0, 80);
@@ -193,6 +302,9 @@ async function probeLiveHost(subdomain) {
       } catch {
         // ignore title parse error
       }
+
+      const techStack = fingerprintTechStack(res, html);
+      const takeoverRisk = checkTakeoverRisk(res, html, subdomain);
 
       return {
         url: targetUrl,
@@ -202,6 +314,9 @@ async function probeLiveHost(subdomain) {
         latencyMs,
         ip,
         server,
+        category,
+        techStack: techStack.length > 0 ? techStack : (server ? [server] : ['Web Server']),
+        takeoverRisk,
       };
     } catch {
       // try next protocol
@@ -217,6 +332,9 @@ async function probeLiveHost(subdomain) {
       title: 'DNS Active (Port 80/443 closed/filtered)',
       latencyMs: 15,
       ip,
+      category,
+      techStack: ['DNS Resolver'],
+      takeoverRisk: null,
     };
   }
 
@@ -585,7 +703,8 @@ function seedDemoScan() {
     'mta-sts.hackerone.com',
     'resources.hackerone.com',
     'support.hackerone.com',
-    'www.hackerone.com'
+    'www.hackerone.com',
+    'assets-legacy.hackerone.com'
   ];
 
   const demoAliveHosts = [
@@ -596,7 +715,9 @@ function seedDemoScan() {
       title: 'HackerOne: Security Begins with Trust',
       latencyMs: 78,
       ip: '104.16.99.52',
-      server: 'cloudflare'
+      server: 'cloudflare',
+      category: 'general',
+      techStack: ['Cloudflare', 'Nginx 1.24', 'React', 'Ruby on Rails']
     },
     {
       url: 'https://www.hackerone.com',
@@ -605,7 +726,9 @@ function seedDemoScan() {
       title: 'HackerOne: Security Begins with Trust',
       latencyMs: 82,
       ip: '104.16.100.52',
-      server: 'cloudflare'
+      server: 'cloudflare',
+      category: 'general',
+      techStack: ['Cloudflare', 'Nginx 1.24', 'React']
     },
     {
       url: 'https://docs.hackerone.com',
@@ -614,7 +737,9 @@ function seedDemoScan() {
       title: 'HackerOne Documentation',
       latencyMs: 110,
       ip: '104.16.99.52',
-      server: 'cloudflare'
+      server: 'cloudflare',
+      category: 'general',
+      techStack: ['Cloudflare', 'Next.js', 'Vercel']
     },
     {
       url: 'https://api.hackerone.com',
@@ -623,7 +748,9 @@ function seedDemoScan() {
       title: 'HackerOne API Portal',
       latencyMs: 95,
       ip: '104.16.100.52',
-      server: 'cloudflare'
+      server: 'cloudflare',
+      category: 'api',
+      techStack: ['Cloudflare', 'Express.js', 'REST API']
     },
     {
       url: 'https://support.hackerone.com',
@@ -632,7 +759,27 @@ function seedDemoScan() {
       title: 'HackerOne Help Center',
       latencyMs: 142,
       ip: '104.16.99.52',
-      server: 'cloudflare'
+      server: 'cloudflare',
+      category: 'auth',
+      techStack: ['Cloudflare', 'Zendesk', 'SAML SSO']
+    },
+    {
+      url: 'http://assets-legacy.hackerone.com',
+      subdomain: 'assets-legacy.hackerone.com',
+      statusCode: 404,
+      title: '404 NoSuchBucket - Amazon S3',
+      latencyMs: 165,
+      ip: '52.216.142.19',
+      server: 'AmazonS3',
+      category: 'cloud',
+      techStack: ['Amazon S3'],
+      takeoverRisk: {
+        isVulnerable: true,
+        service: 'Amazon S3',
+        severity: 'CRITICAL',
+        reason: 'Dangling CNAME points to unregistered AWS S3 bucket returning NoSuchBucket HTTP 404.',
+        remediation: 'Claim the S3 bucket in your AWS organization or delete the stale DNS CNAME entry.'
+      }
     }
   ];
 
