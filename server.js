@@ -429,6 +429,17 @@ Status : SUCCESS
 
   scan.status = 'completed';
   broadcastScanUpdate(scan.id, scan);
+
+  // Close SSE streams cleanly so client immediately transitions
+  const clients = sseClients.get(scan.id) || [];
+  for (const client of clients) {
+    try {
+      client.end();
+    } catch {
+      // ignore
+    }
+  }
+  sseClients.delete(scan.id);
 }
 
 // API Routes

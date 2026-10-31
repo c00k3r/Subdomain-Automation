@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Navbar } from './components/Navbar';
 import { ScannerHero } from './components/ScannerHero';
 import { ScanProgress } from './components/ScanProgress';
@@ -12,6 +12,9 @@ export default function App() {
 
   const [activeScan, setActiveScan] = useState(null);
   const [scansList, setScansList] = useState([]);
+
+  const eventSourceRef = useRef(null);
+  const pollTimerRef = useRef(null);
 
   // Fetch scan history
   const fetchHistory = async () => {
@@ -35,7 +38,7 @@ export default function App() {
         if (data.status === 'running') {
           setIsScanning(true);
           setCurrentView('scanning');
-          listenToScanSSE(scanId);
+          listenToScan(scanId);
         } else if (andShowResults) {
           setIsScanning(false);
           setCurrentView('results');
@@ -48,33 +51,81 @@ export default function App() {
 
   useEffect(() => {
     fetchHistory();
+    return () => {
+      if (eventSourceRef.current) eventSourceRef.current.close();
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    };
   }, []);
 
-  const listenToScanSSE = (scanId) => {
+  const listenToScan = (scanId) => {
     setIsScanning(true);
     setCurrentView('scanning');
-    const eventSource = new EventSource(`/api/recon/stream/${scanId}`);
 
-    eventSource.onmessage = (event) => {
-      try {
-        const update = JSON.parse(event.data);
-        setActiveScan(update);
-        if (update.status === 'completed' || update.status === 'failed') {
-          setIsScanning(false);
-          setCurrentView('results');
-          eventSource.close();
-          fetchHistory();
-        }
-      } catch (err) {
-        console.error('SSE parse error:', err);
-      }
-    };
+    // Clean up any previous listeners/timers
+    if (eventSourceRef.current) eventSourceRef.current.close();
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
 
-    eventSource.onerror = () => {
-      eventSource.close();
+    const onFinish = (completedScan) => {
+      setActiveScan(completedScan);
       setIsScanning(false);
+      setCurrentView('results');
+      if (eventSourceRef.current) eventSourceRef.current.close();
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
       fetchHistory();
     };
+
+    // 1. Server-Sent Events stream
+    try {
+      const es = new EventSource(`/api/recon/stream/${scanId}`);
+      eventSourceRef.current = es;
+
+      es.onmessage = (event) => {
+        try {
+          const update = JSON.parse(event.data);
+          setActiveScan(update);
+          if (update.status === 'completed' || update.status === 'failed') {
+            onFinish(update);
+          }
+        } catch (err) {
+          console.error('SSE parse error:', err);
+        }
+      };
+
+      es.onerror = async () => {
+        es.close();
+        // Check current status on server directly
+        try {
+          const res = await fetch(`/api/recon/scan/${scanId}`);
+          if (res.ok) {
+            const data = await res.json();
+            setActiveScan(data);
+            if (data.status === 'completed' || data.status === 'failed') {
+              onFinish(data);
+            }
+          }
+        } catch {
+          // Poller below will catch it
+        }
+      };
+    } catch {
+      // Fallback to poller
+    }
+
+    // 2. Fallback Interval Poller (every 1s) to ensure we NEVER get stuck on Step 6
+    pollTimerRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/recon/scan/${scanId}`);
+        if (res.ok) {
+          const data = await res.json();
+          setActiveScan(data);
+          if (data.status === 'completed' || data.status === 'failed') {
+            onFinish(data);
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }, 1000);
   };
 
   const handleStartScan = async (domain) => {
@@ -96,7 +147,7 @@ export default function App() {
 
       const { scanId } = await res.json();
       fetchScanDetails(scanId, false);
-      listenToScanSSE(scanId);
+      listenToScan(scanId);
     } catch (err) {
       setErrorMessage(err.message || 'Failed to start scan');
       setIsScanning(false);
@@ -128,7 +179,13 @@ export default function App() {
         )}
 
         {currentView === 'scanning' && (
-          <ScanProgress scan={activeScan} />
+          <ScanProgress
+            scan={activeScan}
+            onComplete={() => {
+              setIsScanning(false);
+              setCurrentView('results');
+            }}
+          />
         )}
 
         {currentView === 'results' && (

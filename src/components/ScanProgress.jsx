@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Loader2, CheckCircle2, Circle, Terminal, Globe, ChevronDown, ChevronUp } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Loader2, CheckCircle2, Circle, Terminal, ChevronDown, ChevronUp, ArrowRight, ShieldCheck } from 'lucide-react';
 import { TerminalLog } from './TerminalLog';
 
 const steps = [
@@ -11,30 +11,50 @@ const steps = [
   { num: 6, label: 'Generating summary & markdown reports' },
 ];
 
-export const ScanProgress = ({ scan }) => {
+export const ScanProgress = ({ scan, onComplete }) => {
   const [showLogs, setShowLogs] = useState(false);
+
+  // Auto-redirect as soon as scan status is completed
+  useEffect(() => {
+    if (scan?.status === 'completed') {
+      const timer = setTimeout(() => {
+        onComplete?.();
+      }, 700);
+      return () => clearTimeout(timer);
+    }
+  }, [scan?.status, onComplete]);
 
   if (!scan) return null;
 
-  const currentStep = scan.step || 1;
-  const progressPercent = Math.min(100, Math.round((currentStep / 6) * 100));
+  const isCompleted = scan.status === 'completed';
+  const currentStep = isCompleted ? 6 : (scan.step || 1);
+  const progressPercent = isCompleted ? 100 : Math.min(100, Math.round((currentStep / 6) * 100));
 
   return (
     <div className="max-w-3xl mx-auto py-10 px-4 space-y-6 animate-fade-in">
       {/* Header status */}
       <div className="text-center space-y-2">
-        <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-indigo-500/10 text-indigo-400 text-xs font-medium">
-          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-          <span>Reconnaissance in progress</span>
-        </div>
+        {isCompleted ? (
+          <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-emerald-500/15 text-emerald-400 text-xs font-semibold border border-emerald-500/25">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+            <span>Reconnaissance Complete</span>
+          </div>
+        ) : (
+          <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-indigo-500/10 text-indigo-400 text-xs font-medium">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            <span>Reconnaissance in progress</span>
+          </div>
+        )}
         
         <h2 className="text-2xl sm:text-3xl font-bold text-white tracking-tight flex items-center justify-center space-x-2">
-          <span>Scanning</span>
+          <span>{isCompleted ? 'Scan Finished for' : 'Scanning'}</span>
           <span className="text-indigo-400 font-mono">{scan.domain}</span>
         </h2>
         
         <p className="text-slate-400 text-sm">
-          Please wait while we gather subdomains and probe active servers...
+          {isCompleted
+            ? 'Summary & markdown reports compiled successfully. Redirecting to results...'
+            : 'Please wait while we gather subdomains and probe active servers...'}
         </p>
       </div>
 
@@ -44,11 +64,15 @@ export const ScanProgress = ({ scan }) => {
         <div className="space-y-2">
           <div className="flex justify-between text-xs font-medium text-slate-400">
             <span>Progress</span>
-            <span className="text-indigo-400 font-bold">{progressPercent}%</span>
+            <span className={isCompleted ? 'text-emerald-400 font-bold' : 'text-indigo-400 font-bold'}>
+              {progressPercent}%
+            </span>
           </div>
           <div className="h-2.5 w-full bg-[#0e1017] rounded-full overflow-hidden">
             <div
-              className="h-full bg-indigo-500 rounded-full transition-all duration-500 ease-out"
+              className={`h-full rounded-full transition-all duration-500 ease-out ${
+                isCompleted ? 'bg-emerald-500' : 'bg-indigo-500'
+              }`}
               style={{ width: `${progressPercent}%` }}
             />
           </div>
@@ -71,6 +95,17 @@ export const ScanProgress = ({ scan }) => {
           </div>
         </div>
 
+        {/* Manual Redirect Button if scan completed */}
+        {isCompleted && (
+          <button
+            onClick={() => onComplete?.()}
+            className="w-full py-3 px-4 rounded-xl font-semibold text-white bg-indigo-600 hover:bg-indigo-500 active:scale-[0.99] transition-all flex items-center justify-center space-x-2 shadow-lg shadow-indigo-600/30 text-sm"
+          >
+            <span>View Results & Reports</span>
+            <ArrowRight className="w-4 h-4" />
+          </button>
+        )}
+
         {/* Checklist */}
         <div className="space-y-3 pt-2">
           <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
@@ -78,8 +113,8 @@ export const ScanProgress = ({ scan }) => {
           </div>
           <div className="space-y-2.5">
             {steps.map((s) => {
-              const isDone = currentStep > s.num;
-              const isCurrent = currentStep === s.num;
+              const isDone = currentStep > s.num || (s.num === 6 && isCompleted);
+              const isCurrent = currentStep === s.num && !isCompleted;
 
               return (
                 <div
@@ -122,7 +157,7 @@ export const ScanProgress = ({ scan }) => {
 
           {showLogs && (
             <div className="mt-3">
-              <TerminalLog logs={scan.logs || []} isScanning={true} />
+              <TerminalLog logs={scan.logs || []} isScanning={!isCompleted} />
             </div>
           )}
         </div>

@@ -17,8 +17,8 @@ import {
 import { TerminalLog } from './TerminalLog';
 import { ReportsViewer } from './ReportsViewer';
 
-export const ResultsView = ({ scan, onNewScan }) => {
-  const [activeTab, setActiveTab] = useState('alive'); // 'alive' | 'all' | 'reports' | 'terminal'
+export const ResultsView = ({ scan, onNewScan, defaultTab = 'reports' }) => {
+  const [activeTab, setActiveTab] = useState(defaultTab); // 'reports' | 'alive' | 'all' | 'terminal'
   const [copiedUrl, setCopiedUrl] = useState(null);
   const [search, setSearch] = useState('');
   const [copiedAll, setCopiedAll] = useState(false);
