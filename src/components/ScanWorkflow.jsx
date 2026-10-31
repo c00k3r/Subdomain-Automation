@@ -1,13 +1,6 @@
 import React from 'react';
 import { CheckCircle2, CircleDashed, Loader2, Search, Filter, ShieldCheck, FileText, Globe } from 'lucide-react';
 
-interface Props {
-  step: number;
-  isScanning: boolean;
-  totalSubdomains: number;
-  aliveCount: number;
-}
-
 const stepsConfig = [
   {
     num: 1,
@@ -47,11 +40,11 @@ const stepsConfig = [
   },
 ];
 
-export const ScanWorkflow: React.FC<Props> = ({
-  step,
-  isScanning,
-  totalSubdomains,
-  aliveCount,
+export const ScanWorkflow = ({
+  step = 0,
+  isScanning = false,
+  totalSubdomains = 0,
+  aliveCount = 0,
 }) => {
   return (
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">

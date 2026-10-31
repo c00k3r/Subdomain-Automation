@@ -1,15 +1,9 @@
 import React, { useState } from 'react';
-import { ShieldAlert, ExternalLink, Copy, Check, Download, Activity, Globe } from 'lucide-react';
-import { LiveHost } from '../types';
+import { ExternalLink, Copy, Check, Download, Activity } from 'lucide-react';
 
-interface Props {
-  aliveHosts: LiveHost[];
-  scanId: string;
-}
-
-export const LiveHostsTable: React.FC<Props> = ({ aliveHosts, scanId }) => {
+export const LiveHostsTable = ({ aliveHosts = [], scanId = '' }) => {
   const [copied, setCopied] = useState(false);
-  const [filterCode, setFilterCode] = useState<string>('all');
+  const [filterCode, setFilterCode] = useState('all');
 
   const filtered = aliveHosts.filter((host) => {
     if (filterCode === 'all') return true;
@@ -27,7 +21,7 @@ export const LiveHostsTable: React.FC<Props> = ({ aliveHosts, scanId }) => {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const getStatusBadge = (code: number) => {
+  const getStatusBadge = (code) => {
     if (code >= 200 && code < 300) {
       return (
         <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">

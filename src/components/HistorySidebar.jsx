@@ -1,14 +1,7 @@
 import React from 'react';
 import { History, Globe, Clock, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
-import { ScanSummaryItem } from '../types';
 
-interface Props {
-  scans: ScanSummaryItem[];
-  currentScanId: string;
-  onSelectScan: (id: string) => void;
-}
-
-export const HistorySidebar: React.FC<Props> = ({ scans, currentScanId, onSelectScan }) => {
+export const HistorySidebar = ({ scans = [], currentScanId = '', onSelectScan }) => {
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-900/40 overflow-hidden shadow-lg flex flex-col h-full">
       <div className="p-3 bg-slate-900 border-b border-slate-800 flex items-center justify-between">

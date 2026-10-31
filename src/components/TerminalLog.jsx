@@ -1,14 +1,9 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Terminal, Copy, Check } from 'lucide-react';
 
-interface Props {
-  logs: string[];
-  isScanning: boolean;
-}
-
-export const TerminalLog: React.FC<Props> = ({ logs, isScanning }) => {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [copied, setCopied] = React.useState(false);
+export const TerminalLog = ({ logs = [], isScanning = false }) => {
+  const containerRef = useRef(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (containerRef.current) {
@@ -25,10 +20,9 @@ export const TerminalLog: React.FC<Props> = ({ logs, isScanning }) => {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const renderColoredText = (text: string) => {
-    // Basic ANSI color parser
+  const renderColoredText = (text) => {
     const regex = /\x1b\[([0-9;]+)m/g;
-    const parts: { text: string; colorClass?: string }[] = [];
+    const parts = [];
     let lastIndex = 0;
     let currentColor = '';
 

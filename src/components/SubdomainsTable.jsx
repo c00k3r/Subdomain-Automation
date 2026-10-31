@@ -1,13 +1,7 @@
 import React, { useState } from 'react';
 import { Search, Copy, Check, Download, ExternalLink, Globe } from 'lucide-react';
 
-interface Props {
-  subdomains: string[];
-  domain: string;
-  scanId: string;
-}
-
-export const SubdomainsTable: React.FC<Props> = ({ subdomains, domain, scanId }) => {
+export const SubdomainsTable = ({ subdomains = [], domain = '', scanId = '' }) => {
   const [search, setSearch] = useState('');
   const [copied, setCopied] = useState(false);
 

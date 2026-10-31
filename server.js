@@ -1,44 +1,8 @@
-import express, { Request, Response } from 'express';
+import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs/promises';
-import { existsSync, createReadStream } from 'fs';
 import dns from 'node:dns/promises';
-import http from 'http';
-
-interface LiveHost {
-  url: string;
-  subdomain: string;
-  statusCode: number;
-  title: string;
-  latencyMs: number;
-  ip?: string;
-  server?: string;
-}
-
-interface ScanData {
-  id: string;
-  domain: string;
-  status: 'running' | 'completed' | 'failed';
-  error?: string;
-  startTime: number;
-  endTime?: number;
-  executionTime?: number;
-  step: number;
-  currentAction: string;
-  totalSubdomains: number;
-  aliveCount: number;
-  subdomains: string[];
-  aliveHosts: LiveHost[];
-  logs: string[];
-  files: {
-    subdomainsTxt: string;
-    aliveTxt: string;
-    summaryTxt: string;
-    reportMd: string;
-    reconLog: string;
-  };
-}
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -48,10 +12,10 @@ app.use(cors());
 app.use(express.json());
 
 // In-memory store for active and past scans
-const scans = new Map<string, ScanData>();
-const sseClients = new Map<string, Response[]>();
+const scans = new Map();
+const sseClients = new Map();
 
-function broadcastScanUpdate(scanId: string, scan: ScanData) {
+function broadcastScanUpdate(scanId, scan) {
   const clients = sseClients.get(scanId) || [];
   const payload = `data: ${JSON.stringify(scan)}\n\n`;
   for (const res of clients) {
@@ -63,14 +27,14 @@ function broadcastScanUpdate(scanId: string, scan: ScanData) {
   }
 }
 
-function appendLog(scan: ScanData, line: string) {
+function appendLog(scan, line) {
   scan.logs.push(line);
   broadcastScanUpdate(scan.id, scan);
 }
 
 // Clean and sanitize domain
-function sanitizeDomain(input: string): string {
-  let domain = input.trim().toLowerCase();
+function sanitizeDomain(input) {
+  let domain = String(input || '').trim().toLowerCase();
   domain = domain.replace(/^https?:\/\//i, '');
   domain = domain.replace(/:\d+$/, '');
   domain = domain.replace(/\/.*$/, '');
@@ -78,13 +42,13 @@ function sanitizeDomain(input: string): string {
 }
 
 // Validation regex
-function isValidDomain(domain: string): boolean {
+function isValidDomain(domain) {
   const pattern = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
   return pattern.test(domain);
 }
 
 // Fetch helper with timeout
-async function fetchWithTimeout(url: string, timeoutMs = 5000): Promise<any> {
+async function fetchWithTimeout(url, timeoutMs = 5000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -104,8 +68,8 @@ async function fetchWithTimeout(url: string, timeoutMs = 5000): Promise<any> {
 }
 
 // Passive Subdomain Enumeration: crt.sh (Subfinder simulation)
-async function runSubfinder(domain: string): Promise<string[]> {
-  const found = new Set<string>();
+async function runSubfinder(domain) {
+  const found = new Set();
   try {
     const url = `https://crt.sh/?q=%25.${encodeURIComponent(domain)}&output=json`;
     const res = await fetchWithTimeout(url, 7000);
@@ -131,8 +95,8 @@ async function runSubfinder(domain: string): Promise<string[]> {
 }
 
 // Additional Enumeration: AlienVault OTX & HackerTarget (Assetfinder simulation)
-async function runAssetfinder(domain: string): Promise<string[]> {
-  const found = new Set<string>();
+async function runAssetfinder(domain) {
+  const found = new Set();
   
   // 1. AlienVault OTX
   try {
@@ -177,15 +141,15 @@ async function runAssetfinder(domain: string): Promise<string[]> {
   return Array.from(found);
 }
 
-// Proactive DNS Brute/Check for top subdomains
-async function resolveCommonSubdomains(domain: string): Promise<string[]> {
+// Proactive DNS resolution for top attack surface subdomains
+async function resolveCommonSubdomains(domain) {
   const commonPrefixes = [
     'www', 'mail', 'api', 'dev', 'app', 'staging', 'portal', 'admin',
     'vpn', 'status', 'docs', 'cdn', 'blog', 'm', 'test', 'git', 'shop',
     'beta', 'login', 'auth', 'support', 'help', 'static', 'cloud', 'secure'
   ];
 
-  const found: string[] = [];
+  const found = [];
   const checks = commonPrefixes.map(async (prefix) => {
     const candidate = `${prefix}.${domain}`;
     try {
@@ -201,8 +165,8 @@ async function resolveCommonSubdomains(domain: string): Promise<string[]> {
 }
 
 // Check live host probe (Httpx simulation)
-async function probeLiveHost(subdomain: string): Promise<LiveHost | null> {
-  let ip: string | undefined;
+async function probeLiveHost(subdomain) {
+  let ip;
   try {
     const ips = await dns.resolve4(subdomain);
     ip = ips[0];
@@ -218,7 +182,7 @@ async function probeLiveHost(subdomain: string): Promise<LiveHost | null> {
       const res = await fetchWithTimeout(targetUrl, 3500);
       const latencyMs = Date.now() - start;
       let title = '';
-      let server = res.headers.get('server') || undefined;
+      const server = res.headers.get('server') || undefined;
 
       try {
         const html = await res.text();
@@ -259,8 +223,8 @@ async function probeLiveHost(subdomain: string): Promise<LiveHost | null> {
   return null;
 }
 
-// Execute the 6-stage recon workflow exactly matching recon.sh and functions.sh
-async function executeReconWorkflow(scan: ScanData) {
+// Execute the 6-stage recon workflow
+async function executeReconWorkflow(scan) {
   const domain = scan.domain;
   const startSec = Math.floor(scan.startTime / 1000);
 
@@ -319,7 +283,7 @@ async function executeReconWorkflow(scan: ScanData) {
   scan.currentAction = 'Checking Live Hosts';
   appendLog(scan, `[5/6] Checking Live Hosts (HTTP/HTTPS Probe)... `);
 
-  const aliveList: LiveHost[] = [];
+  const aliveList = [];
   const batchSize = 6;
   for (let i = 0; i < combined.length; i += batchSize) {
     const chunk = combined.slice(i, i + batchSize);
@@ -349,7 +313,6 @@ async function executeReconWorkflow(scan: ScanData) {
   scan.endTime = Date.now();
   scan.executionTime = timeTaken;
 
-  // Format summary.txt
   const summaryTxt = `===================================================
 Passive Subdomain Recon Automation Tool v2
 ===================================================
@@ -368,7 +331,6 @@ ${dateStr}
 
 ===================================================`;
 
-  // Format report.md
   const reportMd = `# Passive Subdomain Recon Report
 
 ## Target
@@ -399,7 +361,7 @@ ${domain}
 
 | URL | Status | Latency | IP Address | Page Title |
 |-----|--------|---------|------------|------------|
-${aliveList.map(h => `| ${h.url} | ${h.statusCode || 'DNS'} | ${h.latencyMs}ms | ${h.ip || 'N/A'} | ${h.title.replace(/\|/g, '-')} |`).join('\n')}
+${aliveList.map(h => `| ${h.url} | ${h.statusCode || 'DNS'} | ${h.latencyMs}ms | ${h.ip || 'N/A'} | ${(h.title || '').replace(/\|/g, '-')} |`).join('\n')}
 
 ---
 
@@ -408,11 +370,9 @@ Generated:
 ${dateStr}
 `;
 
-  // Format subdomains.txt and alive.txt
   const subdomainsTxt = combined.join('\n');
   const aliveTxt = aliveList.map(h => h.url).join('\n');
 
-  // Format recon.log
   const reconLog = `==================================================
 
 ${dateStr}
@@ -438,7 +398,6 @@ Status : SUCCESS
     reconLog,
   };
 
-  // Write outputs to disk as in original script
   try {
     const outDir = path.resolve(`output/${domain}`);
     const repDir = path.resolve(`reports/${domain}`);
@@ -473,9 +432,7 @@ Status : SUCCESS
 }
 
 // API Routes
-
-// Start a new scan
-app.post('/api/recon/start', async (req: Request, res: Response) => {
+app.post('/api/recon/start', async (req, res) => {
   const rawDomain = req.body?.domain;
   if (!rawDomain) {
     return res.status(400).json({ error: 'Domain is required (e.g. example.com)' });
@@ -487,7 +444,7 @@ app.post('/api/recon/start', async (req: Request, res: Response) => {
   }
 
   const scanId = `scan_${domain.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}`;
-  const scanData: ScanData = {
+  const scanData = {
     id: scanId,
     domain,
     status: 'running',
@@ -510,7 +467,6 @@ app.post('/api/recon/start', async (req: Request, res: Response) => {
 
   scans.set(scanId, scanData);
 
-  // Run in background without blocking API response
   executeReconWorkflow(scanData).catch((err) => {
     console.error('Workflow error:', err);
     scanData.status = 'failed';
@@ -521,8 +477,7 @@ app.post('/api/recon/start', async (req: Request, res: Response) => {
   return res.json({ scanId, domain, status: 'running' });
 });
 
-// SSE endpoint for live logs & progress updates
-app.get('/api/recon/stream/:scanId', (req: Request, res: Response) => {
+app.get('/api/recon/stream/:scanId', (req, res) => {
   const { scanId } = req.params;
   const scan = scans.get(scanId);
 
@@ -544,7 +499,6 @@ app.get('/api/recon/stream/:scanId', (req: Request, res: Response) => {
   }
   clientList.push(res);
 
-  // Send initial state immediately
   res.write(`data: ${JSON.stringify(scan)}\n\n`);
 
   req.on('close', () => {
@@ -553,16 +507,14 @@ app.get('/api/recon/stream/:scanId', (req: Request, res: Response) => {
   });
 });
 
-// Get scan status
-app.get('/api/recon/scan/:scanId', (req: Request, res: Response) => {
+app.get('/api/recon/scan/:scanId', (req, res) => {
   const { scanId } = req.params;
   const scan = scans.get(scanId);
   if (!scan) return res.status(404).json({ error: 'Scan not found' });
   return res.json(scan);
 });
 
-// List all past/active scans
-app.get('/api/recon/history', (_req: Request, res: Response) => {
+app.get('/api/recon/history', (_req, res) => {
   const list = Array.from(scans.values()).map(s => ({
     id: s.id,
     domain: s.domain,
@@ -576,8 +528,7 @@ app.get('/api/recon/history', (_req: Request, res: Response) => {
   return res.json(list.reverse());
 });
 
-// Download scan report or file
-app.get('/api/recon/download/:scanId/:fileType', (req: Request, res: Response) => {
+app.get('/api/recon/download/:scanId/:fileType', (req, res) => {
   const { scanId, fileType } = req.params;
   const scan = scans.get(scanId);
   if (!scan) return res.status(404).send('Scan not found');
@@ -613,7 +564,6 @@ app.get('/api/recon/download/:scanId/:fileType', (req: Request, res: Response) =
   }
 });
 
-// Seed a demo initial scan so the user sees results immediately upon page load
 function seedDemoScan() {
   const domain = 'hackerone.com';
   const scanId = 'scan_hackerone_com_demo';
@@ -627,7 +577,7 @@ function seedDemoScan() {
     'www.hackerone.com'
   ];
 
-  const demoAliveHosts: LiveHost[] = [
+  const demoAliveHosts = [
     {
       url: 'https://hackerone.com',
       subdomain: 'hackerone.com',
@@ -796,7 +746,6 @@ Status : SUCCESS
 
 seedDemoScan();
 
-// Setup dev server with Vite or static production serving
 async function startServer() {
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');

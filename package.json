@@ -4,9 +4,9 @@
   "description": "Passive Subdomain Recon Automation Tool v2",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "node server.js",
     "build": "vite build",
-    "start": "NODE_ENV=production tsx server.ts"
+    "start": "NODE_ENV=production node server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

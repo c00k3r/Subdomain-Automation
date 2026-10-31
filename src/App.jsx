@@ -7,11 +7,8 @@ import {
   Activity,
   FileText,
   Clock,
-  ShieldCheck,
   AlertCircle,
-  RotateCcw,
-  ExternalLink,
-  Layers
+  RotateCcw
 } from 'lucide-react';
 import { Navbar } from './components/Navbar';
 import { TerminalLog } from './components/TerminalLog';
@@ -20,18 +17,16 @@ import { SubdomainsTable } from './components/SubdomainsTable';
 import { LiveHostsTable } from './components/LiveHostsTable';
 import { ReportsViewer } from './components/ReportsViewer';
 import { HistorySidebar } from './components/HistorySidebar';
-import { ScanData, ScanSummaryItem } from './types';
 
 export default function App() {
   const [domainInput, setDomainInput] = useState('');
   const [isScanning, setIsScanning] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState(null);
 
-  const [activeScan, setActiveScan] = useState<ScanData | null>(null);
-  const [scansList, setScansList] = useState<ScanSummaryItem[]>([]);
-  const [activeTab, setActiveTab] = useState<'terminal' | 'subdomains' | 'alive' | 'reports'>('terminal');
+  const [activeScan, setActiveScan] = useState(null);
+  const [scansList, setScansList] = useState([]);
+  const [activeTab, setActiveTab] = useState('terminal');
 
-  // Load history on mount
   const fetchHistory = async () => {
     try {
       const res = await fetch('/api/recon/history');
@@ -47,11 +42,11 @@ export default function App() {
     }
   };
 
-  const fetchScanDetails = async (scanId: string) => {
+  const fetchScanDetails = async (scanId) => {
     try {
       const res = await fetch(`/api/recon/scan/${scanId}`);
       if (res.ok) {
-        const data: ScanData = await res.json();
+        const data = await res.json();
         setActiveScan(data);
         if (data.status === 'running') {
           listenToScanSSE(scanId);
@@ -66,14 +61,13 @@ export default function App() {
     fetchHistory();
   }, []);
 
-  // Listen to SSE updates
-  const listenToScanSSE = (scanId: string) => {
+  const listenToScanSSE = (scanId) => {
     setIsScanning(true);
     const eventSource = new EventSource(`/api/recon/stream/${scanId}`);
 
     eventSource.onmessage = (event) => {
       try {
-        const update: ScanData = JSON.parse(event.data);
+        const update = JSON.parse(event.data);
         setActiveScan(update);
         if (update.status === 'completed' || update.status === 'failed') {
           setIsScanning(false);
@@ -92,7 +86,7 @@ export default function App() {
     };
   };
 
-  const startScan = async (targetDomain?: string) => {
+  const startScan = async (targetDomain) => {
     const domain = (targetDomain || domainInput).trim();
     if (!domain) {
       setErrorMessage('Please enter a target domain (e.g. hackerone.com)');
@@ -118,7 +112,7 @@ export default function App() {
       const { scanId } = await res.json();
       fetchScanDetails(scanId);
       listenToScanSSE(scanId);
-    } catch (err: any) {
+    } catch (err) {
       setErrorMessage(err.message || 'Failed to start reconnaissance scan');
       setIsScanning(false);
     }
@@ -265,7 +259,6 @@ export default function App() {
 
         {/* Main Content Area: Tabs + History Layout */}
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {/* Main Tabs (Terminal, Subdomains, Alive, Reports) */}
           <div className="lg:col-span-3 space-y-4">
             <div className="flex border-b border-slate-800 space-x-1 sm:space-x-3 text-xs sm:text-sm font-medium">
               <button
@@ -289,7 +282,7 @@ export default function App() {
                 }`}
               >
                 <Globe className="w-4 h-4" />
-                <span>Subdomains ({activeScan?.subdomains.length || 0})</span>
+                <span>Subdomains ({activeScan?.subdomains?.length || 0})</span>
               </button>
 
               <button
@@ -301,7 +294,7 @@ export default function App() {
                 }`}
               >
                 <Activity className="w-4 h-4" />
-                <span>Live Hosts ({activeScan?.aliveHosts.length || 0})</span>
+                <span>Live Hosts ({activeScan?.aliveHosts?.length || 0})</span>
               </button>
 
               <button
@@ -352,7 +345,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Right Sidebar: Scan History */}
           <div className="lg:col-span-1 h-[520px]">
             <HistorySidebar
               scans={scansList}

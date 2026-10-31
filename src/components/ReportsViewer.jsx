@@ -1,27 +1,26 @@
 import React, { useState } from 'react';
 import { FileText, Download, Copy, Check, FileCode, Shield } from 'lucide-react';
-import { ScanData } from '../types';
 
-interface Props {
-  scan: ScanData;
-}
-
-export const ReportsViewer: React.FC<Props> = ({ scan }) => {
-  const [activeTab, setActiveTab] = useState<'report' | 'summary' | 'log' | 'subdomains' | 'alive'>('report');
+export const ReportsViewer = ({ scan }) => {
+  const [activeTab, setActiveTab] = useState('report');
   const [copied, setCopied] = useState(false);
+
+  if (!scan) return null;
 
   const getActiveContent = () => {
     switch (activeTab) {
       case 'report':
-        return scan.files.reportMd || 'Report will be generated upon scan completion.';
+        return scan.files?.reportMd || 'Report will be generated upon scan completion.';
       case 'summary':
-        return scan.files.summaryTxt || 'Summary will be generated upon scan completion.';
+        return scan.files?.summaryTxt || 'Summary will be generated upon scan completion.';
       case 'log':
-        return scan.files.reconLog || 'Recon log will be written upon scan completion.';
+        return scan.files?.reconLog || 'Recon log will be written upon scan completion.';
       case 'subdomains':
-        return scan.files.subdomainsTxt || scan.subdomains.join('\n') || 'No subdomains collected.';
+        return scan.files?.subdomainsTxt || (scan.subdomains || []).join('\n') || 'No subdomains collected.';
       case 'alive':
-        return scan.files.aliveTxt || scan.aliveHosts.map((h) => h.url).join('\n') || 'No live hosts identified.';
+        return scan.files?.aliveTxt || (scan.aliveHosts || []).map((h) => h.url).join('\n') || 'No live hosts identified.';
+      default:
+        return '';
     }
   };
 
