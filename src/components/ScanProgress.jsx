@@ -3,12 +3,12 @@ import { Loader2, CheckCircle2, Circle, Terminal, ChevronDown, ChevronUp, ArrowR
 import { TerminalLog } from './TerminalLog';
 
 const steps = [
-  { num: 1, label: 'Checking dependencies & network resolvers' },
-  { num: 2, label: 'Querying Certificate Transparency (Subfinder)' },
-  { num: 3, label: 'Querying Passive DNS feeds (Assetfinder)' },
-  { num: 4, label: 'Merging results & removing duplicates' },
-  { num: 5, label: 'Testing live HTTP/HTTPS hosts (Httpx)' },
-  { num: 6, label: 'Generating summary & markdown reports' },
+  { num: 1, label: 'Validating scope, DNS resolvers & wildcard detection' },
+  { num: 2, label: 'Querying Certificate Transparency logs (crt.sh API)' },
+  { num: 3, label: 'Querying Passive Threat Feeds (AlienVault OTX & HackerTarget)' },
+  { num: 4, label: 'Merging unique hosts & normalizing FQDNs' },
+  { num: 5, label: 'Active HTTP/HTTPS service probing & SSRF safeguards' },
+  { num: 6, label: 'Compiling security audit reports & markdown artifacts' },
 ];
 
 export const ScanProgress = ({ scan, onComplete }) => {

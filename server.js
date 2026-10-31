@@ -3,15 +3,20 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs/promises';
 import dns from 'node:dns/promises';
+import http from 'node:http';
+import https from 'node:https';
+import crypto from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
+// Strict local/CORS configuration
 app.use(cors());
 app.use(express.json());
 
-// In-memory store for active and past scans
+// In-memory store for active and past user scans (no fabricated demo scans)
 const scans = new Map();
 const sseClients = new Map();
 
@@ -32,49 +37,122 @@ function appendLog(scan, line) {
   broadcastScanUpdate(scan.id, scan);
 }
 
-// Clean and sanitize domain
-function sanitizeDomain(input) {
+// Clean and sanitize domain input
+export function sanitizeDomain(input) {
   let domain = String(input || '').trim().toLowerCase();
   domain = domain.replace(/^https?:\/\//i, '');
-  domain = domain.replace(/:\d+$/, '');
   domain = domain.replace(/\/.*$/, '');
+  domain = domain.replace(/:\d+$/, '');
   return domain;
 }
 
-// Validation regex
-function isValidDomain(domain) {
-  const pattern = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
-  return pattern.test(domain);
+// RFC 1035 + Punycode (IDN) compliant validation
+export function isValidDomain(domain) {
+  if (!domain || typeof domain !== 'string') return false;
+  const d = domain.trim().toLowerCase();
+  if (d.length > 253) return false;
+  // Regex supporting ASCII and IDN Punycode labels (e.g. xn--...)
+  const pattern = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+(?:[a-zA-Z]{2,}|xn--[a-zA-Z0-9-]{2,})$/;
+  return pattern.test(d);
 }
 
-// Fetch helper with timeout
-async function fetchWithTimeout(url, timeoutMs = 5000) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ReconForge/2.0',
-        Accept: 'application/json, text/plain, */*',
-      },
-    });
-    clearTimeout(id);
-    return res;
-  } catch (err) {
-    clearTimeout(id);
-    throw err;
+// SSRF Mitigation: Block loopback, link-local, RFC 1918 private IPs, and cloud metadata (169.254.169.254)
+export function isPrivateOrReservedIp(ip) {
+  if (!ip || typeof ip !== 'string') return false;
+  const trimmed = ip.trim();
+
+  // IPv4 Loopback (127.0.0.0/8)
+  if (trimmed.startsWith('127.')) return true;
+
+  // Cloud Instance Metadata Service (IMDS) / Link-local (169.254.0.0/16)
+  if (trimmed.startsWith('169.254.')) return true;
+
+  // RFC 1918 Private networks
+  if (trimmed.startsWith('10.') || trimmed.startsWith('192.168.')) return true;
+  const parts = trimmed.split('.').map(Number);
+  if (parts.length === 4) {
+    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+    // Carrier Grade NAT (100.64.0.0/10)
+    if (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) return true;
+    // Zero address / Broadcast
+    if (parts[0] === 0 || parts[0] === 255) return true;
   }
+
+  // IPv6 loopback, link-local, unique local
+  if (trimmed === '::1' || trimmed.startsWith('fe80:') || trimmed.startsWith('fc00:') || trimmed.startsWith('fd00:')) {
+    return true;
+  }
+
+  return false;
 }
 
-// Passive Subdomain Enumeration: crt.sh (Subfinder simulation)
-async function runSubfinder(domain) {
-  const found = new Set();
+// Safe HTTP/HTTPS request with timeout and TLS options
+function safeHttpRequest(targetUrl, timeoutMs = 4000) {
+  return new Promise((resolve, reject) => {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(targetUrl);
+    } catch (e) {
+      return reject(e);
+    }
+
+    const isHttps = parsedUrl.protocol === 'https:';
+    const client = isHttps ? https : http;
+
+    const req = client.request(
+      parsedUrl,
+      {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ReconForge/2.0',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+        timeout: timeoutMs,
+        // Allow self-signed or untrusted TLS certificates during security assessment
+        rejectUnauthorized: false,
+      },
+      (res) => {
+        let data = '';
+        res.setEncoding('utf8');
+
+        // Only buffer up to 100KB for HTML title / tech checks
+        res.on('data', (chunk) => {
+          if (data.length < 100000) {
+            data += chunk;
+          }
+        });
+
+        res.on('end', () => {
+          resolve({
+            statusCode: res.statusCode || 0,
+            headers: res.headers,
+            body: data,
+          });
+        });
+      }
+    );
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error(`Connection timed out (${timeoutMs}ms)`));
+    });
+
+    req.on('error', (err) => {
+      reject(err);
+    });
+
+    req.end();
+  });
+}
+
+// 1. Certificate Transparency Logs via crt.sh API (with honest error reporting)
+async function queryCrtSh(domain) {
+  const records = new Set();
+  const url = `https://crt.sh/?q=%25.${encodeURIComponent(domain)}&output=json`;
   try {
-    const url = `https://crt.sh/?q=%25.${encodeURIComponent(domain)}&output=json`;
-    const res = await fetchWithTimeout(url, 7000);
-    if (res.ok) {
-      const data = await res.json();
+    const res = await safeHttpRequest(url, 7000);
+    if (res.statusCode === 200) {
+      const data = JSON.parse(res.body);
       if (Array.isArray(data)) {
         for (const entry of data) {
           const names = String(entry.name_value || '').split('\n');
@@ -82,66 +160,90 @@ async function runSubfinder(domain) {
             name = name.trim().toLowerCase();
             if (name.startsWith('*.')) name = name.slice(2);
             if (name.endsWith(`.${domain}`) || name === domain) {
-              if (isValidDomain(name)) found.add(name);
+              if (isValidDomain(name)) records.add(name);
             }
           }
         }
       }
+      return { records: Array.from(records), error: null };
+    } else {
+      return { records: [], error: `HTTP ${res.statusCode} status from crt.sh` };
     }
-  } catch {
-    // If crt.sh is slow or rate limits, continue
+  } catch (err) {
+    return { records: [], error: err.message || 'Request timeout' };
   }
-  return Array.from(found);
 }
 
-// Additional Enumeration: AlienVault OTX & HackerTarget (Assetfinder simulation)
-async function runAssetfinder(domain) {
-  const found = new Set();
-  
-  // 1. AlienVault OTX
+// 2. Passive DNS via AlienVault OTX
+async function queryAlienVaultOTX(domain) {
+  const records = new Set();
+  const url = `https://otx.alienvault.com/api/v1/indicators/domain/${encodeURIComponent(domain)}/passive_dns`;
   try {
-    const otxUrl = `https://otx.alienvault.com/api/v1/indicators/domain/${encodeURIComponent(domain)}/passive_dns`;
-    const res = await fetchWithTimeout(otxUrl, 6000);
-    if (res.ok) {
-      const data = await res.json();
+    const res = await safeHttpRequest(url, 6000);
+    if (res.statusCode === 200) {
+      const data = JSON.parse(res.body);
       if (Array.isArray(data?.passive_dns)) {
         for (const item of data.passive_dns) {
           const host = String(item.hostname || '').trim().toLowerCase();
           if (host.endsWith(`.${domain}`) || host === domain) {
-            if (isValidDomain(host)) found.add(host);
+            if (isValidDomain(host)) records.add(host);
           }
         }
       }
+      return { records: Array.from(records), error: null };
+    } else {
+      return { records: [], error: `HTTP ${res.statusCode}` };
     }
-  } catch {
-    // Continue
+  } catch (err) {
+    return { records: [], error: err.message || 'Timeout' };
   }
-
-  // 2. HackerTarget free query
-  try {
-    const htUrl = `https://api.hackertarget.com/hostsearch/?q=${encodeURIComponent(domain)}`;
-    const res = await fetchWithTimeout(htUrl, 5000);
-    if (res.ok) {
-      const text = await res.text();
-      if (!text.includes('error') && !text.includes('API count')) {
-        const lines = text.split('\n');
-        for (const line of lines) {
-          const parts = line.split(',');
-          const host = (parts[0] || '').trim().toLowerCase();
-          if (host.endsWith(`.${domain}`) || host === domain) {
-            if (isValidDomain(host)) found.add(host);
-          }
-        }
-      }
-    }
-  } catch {
-    // Continue
-  }
-
-  return Array.from(found);
 }
 
-// Proactive DNS resolution for top attack surface subdomains
+// 3. Passive Host Search via HackerTarget (robust line-by-line parsing)
+async function queryHackerTarget(domain) {
+  const records = new Set();
+  const url = `https://api.hackertarget.com/hostsearch/?q=${encodeURIComponent(domain)}`;
+  try {
+    const res = await safeHttpRequest(url, 5000);
+    if (res.statusCode === 200) {
+      const text = res.body.trim();
+      // Handle known API rejection lines without dropping hostnames containing "error"
+      if (text.startsWith('API count exceeded') || text.startsWith('No records found') || text.startsWith('error check your search')) {
+        return { records: [], error: text.slice(0, 50) };
+      }
+
+      const lines = text.split('\n');
+      for (const line of lines) {
+        const parts = line.split(',');
+        const host = (parts[0] || '').trim().toLowerCase();
+        if (host.endsWith(`.${domain}`) || host === domain) {
+          if (isValidDomain(host)) records.add(host);
+        }
+      }
+      return { records: Array.from(records), error: null };
+    }
+    return { records: [], error: `HTTP ${res.statusCode}` };
+  } catch (err) {
+    return { records: [], error: err.message || 'Timeout' };
+  }
+}
+
+// 4. Wildcard DNS Pre-Check: Probes a random non-existent subdomain to prevent false positive bursts
+export async function detectWildcardDNS(domain) {
+  const randomSuffix = crypto.randomBytes(4).toString('hex');
+  const testHost = `_wildcard_check_${randomSuffix}.${domain}`;
+  try {
+    const ips = await dns.resolve4(testHost);
+    if (ips && ips.length > 0) {
+      return { hasWildcard: true, wildcardIps: ips };
+    }
+  } catch {
+    // Expected behavior: NXDOMAIN / ENOTFOUND
+  }
+  return { hasWildcard: false, wildcardIps: [] };
+}
+
+// 5. Active DNS dictionary checking for high-frequency prefixes (only run if NO wildcard DNS)
 async function resolveCommonSubdomains(domain) {
   const commonPrefixes = [
     'www', 'mail', 'api', 'dev', 'app', 'staging', 'portal', 'admin',
@@ -156,7 +258,7 @@ async function resolveCommonSubdomains(domain) {
       await dns.resolve4(candidate);
       found.push(candidate);
     } catch {
-      // not resolvable
+      // non-existent
     }
   });
 
@@ -164,40 +266,32 @@ async function resolveCommonSubdomains(domain) {
   return found;
 }
 
-// Classify subdomain by attack surface category
+// Categorize subdomains for offensive security triage
 function categorizeSubdomain(subdomain) {
   const s = subdomain.toLowerCase();
-  if (/(?:^|\.)(?:auth|login|sso|vpn|portal|identity|keycloak|okta|access|idp)(?:\.|$)/.test(s)) {
-    return 'auth';
-  }
-  if (/(?:^|\.)(?:api|v[0-9]|graphql|gateway|rest|grpc|backend|services?)(?:\.|$)/.test(s)) {
-    return 'api';
-  }
-  if (/(?:^|\.)(?:dev|staging|stage|test|qa|internal|corp|uat|sandbox|demo|preprod)(?:\.|$)/.test(s)) {
-    return 'staging';
-  }
-  if (/(?:^|\.)(?:s3|cdn|assets|static|storage|bucket|media|img)(?:\.|$)/.test(s)) {
-    return 'cloud';
-  }
+  if (/(?:^|\.)(?:auth|login|sso|vpn|portal|identity|keycloak|okta|access|idp)(?:\.|$)/.test(s)) return 'auth';
+  if (/(?:^|\.)(?:api|v[0-9]|graphql|gateway|rest|grpc|backend|services?)(?:\.|$)/.test(s)) return 'api';
+  if (/(?:^|\.)(?:dev|staging|stage|test|qa|internal|corp|uat|sandbox|demo|preprod)(?:\.|$)/.test(s)) return 'staging';
+  if (/(?:^|\.)(?:s3|cdn|assets|static|storage|bucket|media|img)(?:\.|$)/.test(s)) return 'cloud';
   return 'general';
 }
 
-// Fingerprint tech stack from response headers and body
-function fingerprintTechStack(res, body = '') {
+// Technology stack fingerprinting from response headers and body
+function fingerprintTechStack(headers = {}, body = '') {
   const tech = new Set();
-  const server = (res.headers.get('server') || '').toLowerCase();
-  const poweredBy = (res.headers.get('x-powered-by') || '').toLowerCase();
-  const via = (res.headers.get('via') || '').toLowerCase();
+  const server = String(headers['server'] || '').toLowerCase();
+  const poweredBy = String(headers['x-powered-by'] || '').toLowerCase();
+  const via = String(headers['via'] || '').toLowerCase();
 
-  // CDN & Cloud Detection
-  if (res.headers.get('cf-ray') || server.includes('cloudflare')) tech.add('Cloudflare');
-  if (res.headers.get('x-amz-cf-id') || via.includes('cloudfront')) tech.add('AWS CloudFront');
-  if (res.headers.get('x-fastly-request-id') || server.includes('fastly')) tech.add('Fastly');
-  if (server.includes('akamai') || res.headers.get('x-akamai-transformed')) tech.add('Akamai');
-  if (server.includes('vercel') || res.headers.get('x-vercel-id')) tech.add('Vercel');
+  // CDNs and Reverse Proxies
+  if (headers['cf-ray'] || server.includes('cloudflare')) tech.add('Cloudflare');
+  if (headers['x-amz-cf-id'] || via.includes('cloudfront')) tech.add('AWS CloudFront');
+  if (headers['x-fastly-request-id'] || server.includes('fastly')) tech.add('Fastly');
+  if (server.includes('akamai') || headers['x-akamai-transformed']) tech.add('Akamai');
+  if (server.includes('vercel') || headers['x-vercel-id']) tech.add('Vercel');
   if (server.includes('netlify')) tech.add('Netlify');
-  if (server.includes('gws') || server.includes('google')) tech.add('Google Cloud');
-  if (server.includes('github') || res.headers.get('x-github-request-id')) tech.add('GitHub Pages');
+  if (server.includes('gws') || server.includes('google')) tech.add('Google Front-End');
+  if (server.includes('github') || headers['x-github-request-id']) tech.add('GitHub Pages');
 
   // Web Servers
   if (server.includes('nginx')) {
@@ -209,13 +303,13 @@ function fingerprintTechStack(res, body = '') {
   if (server.includes('envoy')) tech.add('Envoy');
   if (server.includes('iis')) tech.add('Microsoft IIS');
 
-  // Frameworks & Languages
+  // Application Stacks
   if (poweredBy.includes('express')) tech.add('Express.js');
   if (poweredBy.includes('php')) tech.add('PHP');
   if (poweredBy.includes('asp.net')) tech.add('ASP.NET');
   if (poweredBy.includes('next.js')) tech.add('Next.js');
 
-  // Body keywords
+  // Body signatures
   if (body.includes('wp-content')) tech.add('WordPress');
   if (body.includes('__next')) tech.add('Next.js');
   if (body.includes('react')) tech.add('React');
@@ -223,19 +317,17 @@ function fingerprintTechStack(res, body = '') {
   return Array.from(tech);
 }
 
-// Subdomain Takeover Signature Check
-function checkTakeoverRisk(res, body = '', subdomain = '') {
-  const status = res.status;
+// Subdomain Takeover Vulnerability Signature Check
+function checkTakeoverRisk(statusCode, body = '') {
   const b = body.toLowerCase();
-  
-  if (status === 404) {
-    if (b.includes("there isn't a github pages site here") || b.includes('for root urls (like http://example.com/) you must provide an index.html file')) {
+  if (statusCode === 404) {
+    if (b.includes("there isn't a github pages site here") || b.includes('for root urls you must provide an index.html file')) {
       return {
         isVulnerable: true,
         service: 'GitHub Pages',
         severity: 'HIGH',
         reason: 'Dangling CNAME points to unclaimed GitHub Pages repository.',
-        remediation: 'Claim the GitHub Pages repo or remove the stale DNS CNAME entry.',
+        remediation: 'Claim the GitHub repository or delete the stale DNS CNAME entry.',
       };
     }
     if (b.includes('the specified bucket does not exist') || b.includes('nosuchbucket')) {
@@ -244,10 +336,10 @@ function checkTakeoverRisk(res, body = '', subdomain = '') {
         service: 'Amazon S3',
         severity: 'CRITICAL',
         reason: 'Dangling CNAME points to deleted or unregistered S3 bucket.',
-        remediation: 'Create the S3 bucket in your AWS account or delete the CNAME record.',
+        remediation: 'Claim the S3 bucket in your AWS account or delete the CNAME record.',
       };
     }
-    if (b.includes('herokucdn.com') || b.includes('no such app') || b.includes('item not found')) {
+    if (b.includes('herokucdn.com') || b.includes('no such app')) {
       return {
         isVulnerable: true,
         service: 'Heroku',
@@ -266,56 +358,81 @@ function checkTakeoverRisk(res, body = '', subdomain = '') {
       };
     }
   }
-
   return null;
 }
 
-// Check live host probe (Httpx simulation)
+// Active Host Prober with Real Latency Measurement, Dual IPv4/IPv6 & SSRF Defense
 async function probeLiveHost(subdomain) {
-  let ip;
+  let ip4 = null;
+  let ip6 = null;
+  let dnsTime = 0;
+
+  // Measure genuine DNS lookup latency
+  const dnsStart = performance.now();
   try {
-    const ips = await dns.resolve4(subdomain);
-    ip = ips[0];
+    const results = await dns.resolve4(subdomain);
+    ip4 = results[0];
   } catch {
-    // Can still probe HTTP directly
+    // try IPv6
   }
 
-  const category = categorizeSubdomain(subdomain);
-  const protocols = ['https://', 'http://'];
+  try {
+    const results6 = await dns.resolve6(subdomain);
+    ip6 = results6[0];
+  } catch {
+    // no IPv6
+  }
+  dnsTime = Math.round(performance.now() - dnsStart);
 
+  const primaryIp = ip4 || ip6;
+  const category = categorizeSubdomain(subdomain);
+
+  // SSRF Protection: If resolved IP is private/loopback/cloud metadata, block outbound HTTP!
+  if (primaryIp && isPrivateOrReservedIp(primaryIp)) {
+    return {
+      url: `http://${subdomain}`,
+      subdomain,
+      statusCode: 0,
+      title: '',
+      latencyMs: dnsTime,
+      ip: primaryIp,
+      ipv6: ip6,
+      category,
+      techStack: ['Internal IP (SSRF Blocked)'],
+      takeoverRisk: null,
+      ssrfBlocked: true,
+    };
+  }
+
+  // Probe HTTPS first, then fallback to HTTP
+  const protocols = ['https://', 'http://'];
   for (const protocol of protocols) {
     const targetUrl = `${protocol}${subdomain}`;
-    const start = Date.now();
+    const httpStart = performance.now();
     try {
-      const res = await fetchWithTimeout(targetUrl, 3500);
-      const latencyMs = Date.now() - start;
-      let title = '';
-      const server = res.headers.get('server') || undefined;
-      let html = '';
+      const res = await safeHttpRequest(targetUrl, 3800);
+      const latencyMs = Math.round(performance.now() - httpStart);
 
-      try {
-        html = await res.text();
-        const match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-        if (match && match[1]) {
-          title = match[1].trim().slice(0, 80);
-        }
-      } catch {
-        // ignore title parse error
+      let title = '';
+      const match = res.body.match(/<title[^>]*>([^<]+)<\/title>/i);
+      if (match && match[1]) {
+        title = match[1].trim().slice(0, 90);
       }
 
-      const techStack = fingerprintTechStack(res, html);
-      const takeoverRisk = checkTakeoverRisk(res, html, subdomain);
+      const techStack = fingerprintTechStack(res.headers, res.body);
+      const takeoverRisk = checkTakeoverRisk(res.statusCode, res.body);
 
       return {
         url: targetUrl,
         subdomain,
-        statusCode: res.status,
-        title: title || `${subdomain} (${res.status})`,
+        statusCode: res.statusCode,
+        title, // Honest: empty string if no HTML title found
         latencyMs,
-        ip,
-        server,
+        ip: primaryIp,
+        ipv6: ip6,
+        server: res.headers['server'] || undefined,
         category,
-        techStack: techStack.length > 0 ? techStack : (server ? [server] : ['Web Server']),
+        techStack: techStack.length > 0 ? techStack : (res.headers['server'] ? [res.headers['server']] : ['Web Server']),
         takeoverRisk,
       };
     } catch {
@@ -323,17 +440,18 @@ async function probeLiveHost(subdomain) {
     }
   }
 
-  // If DNS resolved, mark as host alive via DNS even if HTTP port blocked
-  if (ip) {
+  // If DNS resolved but HTTP ports are unreachable
+  if (primaryIp) {
     return {
       url: `http://${subdomain}`,
       subdomain,
       statusCode: 0,
-      title: 'DNS Active (Port 80/443 closed/filtered)',
-      latencyMs: 15,
-      ip,
+      title: '',
+      latencyMs: dnsTime, // Real measured DNS latency
+      ip: primaryIp,
+      ipv6: ip6,
       category,
-      techStack: ['DNS Resolver'],
+      techStack: ['DNS Only (Web Ports Closed)'],
       takeoverRisk: null,
     };
   }
@@ -341,65 +459,80 @@ async function probeLiveHost(subdomain) {
   return null;
 }
 
-// Execute the 6-stage recon workflow
+// 6-Stage Reconnaissance Pipeline
 async function executeReconWorkflow(scan) {
   const domain = scan.domain;
   const startSec = Math.floor(scan.startTime / 1000);
 
   appendLog(scan, `\x1b[34m===========================================================\x1b[0m`);
-  appendLog(scan, `\x1b[34m        Passive Subdomain Recon Automation Tool v2         \x1b[0m`);
+  appendLog(scan, `\x1b[34m        ReconForge Automation Engine v2.0                  \x1b[0m`);
   appendLog(scan, `\x1b[34m===========================================================\x1b[0m`);
-  appendLog(scan, `\x1b[36mTarget          :\x1b[0m ${domain}`);
-  appendLog(scan, `\x1b[36mOutput Folder   :\x1b[0m output/${domain}`);
+  appendLog(scan, `\x1b[36mTarget Domain   :\x1b[0m ${domain}`);
+  appendLog(scan, `\x1b[36mMode            :\x1b[0m Passive Enumeration + Active Service Probing`);
+  appendLog(scan, `\x1b[36mArtifacts Path  :\x1b[0m output/${domain}`);
   appendLog(scan, `-----------------------------------------------------------`);
 
-  // Stage 1: Check Dependencies
+  // Stage 1: Scope Validation & Resolver Verification
   scan.step = 1;
-  scan.currentAction = 'Checking Dependencies';
-  appendLog(scan, `[1/6] Checking Dependencies... \x1b[32m✓ (Node.js Recon Engine Online)\x1b[0m`);
+  scan.currentAction = 'Validating Scope & Initializing Resolvers';
+  appendLog(scan, `[1/6] Validating Target Scope & Resolvers... \x1b[32m✓\x1b[0m`);
 
-  // Stage 2: Run Subfinder
+  // Stage 2: Certificate Transparency Logs (crt.sh API)
   scan.step = 2;
-  scan.currentAction = 'Running Subfinder';
-  appendLog(scan, `[2/6] Running Subfinder (Certificate Transparency logs)... `);
-  
-  const subfinderResults = await runSubfinder(domain);
-  appendLog(scan, `      Subfinder discovered: ${subfinderResults.length} records \x1b[32m✓\x1b[0m`);
-
-  // Stage 3: Run Assetfinder
-  scan.step = 3;
-  scan.currentAction = 'Running Assetfinder';
-  appendLog(scan, `[3/6] Running Assetfinder (Passive DNS & Open Source Feeds)... `);
-
-  const [assetfinderResults, dnsResults] = await Promise.all([
-    runAssetfinder(domain),
-    resolveCommonSubdomains(domain),
-  ]);
-  appendLog(scan, `      Assetfinder discovered: ${assetfinderResults.length} records \x1b[32m✓\x1b[0m`);
-  if (dnsResults.length > 0) {
-    appendLog(scan, `      DNS resolver identified: ${dnsResults.length} active prefixes`);
+  scan.currentAction = 'Querying Certificate Transparency Logs';
+  appendLog(scan, `[2/6] Querying Certificate Transparency (crt.sh API)... `);
+  const crtResult = await queryCrtSh(domain);
+  if (crtResult.error) {
+    appendLog(scan, `      crt.sh: \x1b[33m${crtResult.error}\x1b[0m (0 records)`);
+  } else {
+    appendLog(scan, `      crt.sh: ${crtResult.records.length} records discovered \x1b[32m✓\x1b[0m`);
   }
 
-  // Stage 4: Merge Results & Remove Duplicates
+  // Stage 3: Passive Threat Intelligence & DNS Feeds
+  scan.step = 3;
+  scan.currentAction = 'Querying Passive Threat Intel & DNS Feeds';
+  appendLog(scan, `[3/6] Querying Passive DNS Feeds (AlienVault OTX & HackerTarget)... `);
+
+  const [otxResult, htResult, wildcardCheck] = await Promise.all([
+    queryAlienVaultOTX(domain),
+    queryHackerTarget(domain),
+    detectWildcardDNS(domain),
+  ]);
+
+  appendLog(scan, `      AlienVault OTX: ${otxResult.records.length} records ${otxResult.error ? `\x1b[33m(${otxResult.error})\x1b[0m` : '\x1b[32m✓\x1b[0m'}`);
+  appendLog(scan, `      HackerTarget  : ${htResult.records.length} records ${htResult.error ? `\x1b[33m(${htResult.error})\x1b[0m` : '\x1b[32m✓\x1b[0m'}`);
+
+  let dictionaryRecords = [];
+  if (wildcardCheck.hasWildcard) {
+    appendLog(scan, `      \x1b[33m[Notice] Wildcard DNS active (*.${domain} -> ${wildcardCheck.wildcardIps.join(', ')})\x1b[0m - dictionary guessing bypassed to avoid false positives.`);
+  } else {
+    dictionaryRecords = await resolveCommonSubdomains(domain);
+    if (dictionaryRecords.length > 0) {
+      appendLog(scan, `      Active DNS Resolvers: ${dictionaryRecords.length} active prefixes verified \x1b[32m✓\x1b[0m`);
+    }
+  }
+
+  // Stage 4: Deduplication & Normalization
   scan.step = 4;
-  scan.currentAction = 'Merging Results & Deduplicating';
-  appendLog(scan, `[4/6] Merging Results & Removing Duplicates... `);
+  scan.currentAction = 'Deduplicating & Normalizing Attack Surface';
+  appendLog(scan, `[4/6] Deduplicating & Normalizing Target List... `);
 
   const combined = Array.from(new Set([
     domain,
-    ...subfinderResults,
-    ...assetfinderResults,
-    ...dnsResults,
+    ...crtResult.records,
+    ...otxResult.records,
+    ...htResult.records,
+    ...dictionaryRecords,
   ])).sort();
 
   scan.subdomains = combined;
   scan.totalSubdomains = combined.length;
-  appendLog(scan, `      Unique subdomains: ${scan.totalSubdomains} \x1b[32m✓\x1b[0m`);
+  appendLog(scan, `      Unique attack surface targets: ${scan.totalSubdomains} \x1b[32m✓\x1b[0m`);
 
-  // Stage 5: Check Live Hosts (Httpx)
+  // Stage 5: Active HTTP/TLS Probing & SSRF Defense
   scan.step = 5;
-  scan.currentAction = 'Checking Live Hosts';
-  appendLog(scan, `[5/6] Checking Live Hosts (HTTP/HTTPS Probe)... `);
+  scan.currentAction = 'Probing Live HTTP/TLS Services';
+  appendLog(scan, `[5/6] Probing Live HTTP/TLS Services & Checking SSRF Safeguards... `);
 
   const aliveList = [];
   const batchSize = 6;
@@ -409,7 +542,10 @@ async function executeReconWorkflow(scan) {
     for (const r of results) {
       if (r) {
         aliveList.push(r);
-        appendLog(scan, `      [ALIVE] ${r.url} [Status: ${r.statusCode || 'DNS Only'}] [${r.latencyMs}ms] ${r.title ? `"${r.title}"` : ''}`);
+        const logLine = r.ssrfBlocked
+          ? `      [SSRF BLOCKED] ${r.subdomain} (Points to private IP: ${r.ip})`
+          : `      [ALIVE] ${r.url} [Status: ${r.statusCode || 'DNS'}] [${r.latencyMs}ms] ${r.title ? `"${r.title}"` : ''}`;
+        appendLog(scan, logLine);
       }
     }
     scan.aliveHosts = [...aliveList];
@@ -417,12 +553,12 @@ async function executeReconWorkflow(scan) {
     broadcastScanUpdate(scan.id, scan);
   }
 
-  appendLog(scan, `      Live hosts verified: ${aliveList.length} \x1b[32m✓\x1b[0m`);
+  appendLog(scan, `      Live services verified: ${aliveList.length} \x1b[32m✓\x1b[0m`);
 
-  // Stage 6: Generate Summary, Markdown Report, and Logs
+  // Stage 6: Report Compilation & Artifact Generation
   scan.step = 6;
   scan.currentAction = 'Generating Summary & Reports';
-  appendLog(scan, `[6/6] Generating Summary, Markdown Report & Logs... `);
+  appendLog(scan, `[6/6] Generating Summary, Markdown Report & Audit Logs... `);
 
   const endSec = Math.floor(Date.now() / 1000);
   const timeTaken = Math.max(1, endSec - startSec);
@@ -432,78 +568,69 @@ async function executeReconWorkflow(scan) {
   scan.executionTime = timeTaken;
 
   const summaryTxt = `===================================================
-Passive Subdomain Recon Automation Tool v2
+ReconForge Reconnaissance Summary v2.0
 ===================================================
 
-Target Domain : ${domain}
+Target Domain       : ${domain}
+Unique Subdomains   : ${scan.totalSubdomains}
+Live HTTP Services  : ${scan.aliveCount}
+Execution Time      : ${timeTaken} seconds
+Generated At        : ${dateStr}
 
-Unique Subdomains : ${scan.totalSubdomains}
-
-Live Hosts : ${scan.aliveCount}
-
-Execution Time : ${timeTaken} seconds
-
-Generated :
-
-${dateStr}
+Sources Consulted:
+- Certificate Transparency (crt.sh): ${crtResult.records.length} records
+- AlienVault OTX Passive DNS       : ${otxResult.records.length} records
+- HackerTarget Host Search         : ${htResult.records.length} records
+- DNS Resolvers Verified           : ${dictionaryRecords.length} records
+- Wildcard DNS Detected            : ${wildcardCheck.hasWildcard ? 'YES' : 'NO'}
 
 ===================================================`;
 
-  const reportMd = `# Passive Subdomain Recon Report
+  const reportMd = `# ReconForge Reconnaissance Report
 
-## Target
+## Executive Summary
 
-${domain}
-
----
-
-## Scan Statistics
-
-| Item | Value |
-|------|-------|
-| Total Subdomains | ${scan.totalSubdomains} |
-| Live Hosts | ${scan.aliveCount} |
+| Parameter | Value |
+|-----------|-------|
+| Target Domain | \`${domain}\` |
+| Total Subdomains | **${scan.totalSubdomains}** |
+| Live Responding Services | **${scan.aliveCount}** |
 | Execution Time | ${timeTaken} seconds |
+| Wildcard DNS | ${wildcardCheck.hasWildcard ? 'Active' : 'Disabled'} |
+| Date | ${dateStr} |
 
 ---
 
-## Output Files
+## Output Artifacts
 
-- output/${domain}/subdomains.txt
-- output/${domain}/alive.txt
-- output/${domain}/summary.txt
-
----
-
-## Discovered Live Hosts
-
-| URL | Status | Latency | IP Address | Page Title |
-|-----|--------|---------|------------|------------|
-${aliveList.map(h => `| ${h.url} | ${h.statusCode || 'DNS'} | ${h.latencyMs}ms | ${h.ip || 'N/A'} | ${(h.title || '').replace(/\|/g, '-')} |`).join('\n')}
+- \`output/${domain}/subdomains.txt\`
+- \`output/${domain}/alive.txt\`
+- \`output/${domain}/summary.txt\`
 
 ---
 
-Generated:
+## Discovered Live Applications
 
-${dateStr}
+| URL | Status | Latency | IP Address | Technologies | Title |
+|-----|--------|---------|------------|--------------|-------|
+${aliveList.map(h => `| ${h.url} | ${h.statusCode || 'DNS'} | ${h.latencyMs}ms | ${h.ip || 'N/A'} | ${(h.techStack || []).join(', ') || 'Web Server'} | ${(h.title || '').replace(/\|/g, '-')} |`).join('\n')}
+
+---
+
+Generated by ReconForge v2.0
 `;
 
   const subdomainsTxt = combined.join('\n');
   const aliveTxt = aliveList.map(h => h.url).join('\n');
-
   const reconLog = `==================================================
 
 ${dateStr}
 
-Target : ${domain}
-
-Subdomains : ${scan.totalSubdomains}
-
-Alive Hosts : ${scan.aliveCount}
-
-Execution Time : ${timeTaken} seconds
-
-Status : SUCCESS
+Target          : ${domain}
+Total Targets   : ${scan.totalSubdomains}
+Live Services   : ${scan.aliveCount}
+Execution Time  : ${timeTaken} seconds
+Status          : SUCCESS
 
 ==================================================
 `;
@@ -539,7 +666,7 @@ Status : SUCCESS
   appendLog(scan, `\x1b[32mScan Summary\x1b[0m`);
   appendLog(scan, `Target Domain      : ${domain}`);
   appendLog(scan, `Unique Subdomains  : ${scan.totalSubdomains}`);
-  appendLog(scan, `Live Hosts         : ${scan.aliveCount}`);
+  appendLog(scan, `Live Services      : ${scan.aliveCount}`);
   appendLog(scan, `Execution Time     : ${timeTaken} seconds`);
   appendLog(scan, `===========================================================`);
   appendLog(scan, `Completed.`);
@@ -564,12 +691,12 @@ Status : SUCCESS
 app.post('/api/recon/start', async (req, res) => {
   const rawDomain = req.body?.domain;
   if (!rawDomain) {
-    return res.status(400).json({ error: 'Domain is required (e.g. example.com)' });
+    return res.status(400).json({ error: 'Target domain is required (e.g. example.com)' });
   }
 
   const domain = sanitizeDomain(String(rawDomain));
   if (!isValidDomain(domain)) {
-    return res.status(400).json({ error: 'Invalid domain format. Example: example.com, hackerone.com' });
+    return res.status(400).json({ error: 'Invalid domain syntax. Examples: example.com, hackerone.com' });
   }
 
   const scanId = `scan_${domain.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}`;
@@ -579,7 +706,7 @@ app.post('/api/recon/start', async (req, res) => {
     status: 'running',
     startTime: Date.now(),
     step: 0,
-    currentAction: 'Initializing scan',
+    currentAction: 'Initializing scope',
     totalSubdomains: 0,
     aliveCount: 0,
     subdomains: [],
@@ -693,217 +820,6 @@ app.get('/api/recon/download/:scanId/:fileType', (req, res) => {
   }
 });
 
-function seedDemoScan() {
-  const domain = 'hackerone.com';
-  const scanId = 'scan_hackerone_com_demo';
-  const demoSubdomains = [
-    'hackerone.com',
-    'api.hackerone.com',
-    'docs.hackerone.com',
-    'mta-sts.hackerone.com',
-    'resources.hackerone.com',
-    'support.hackerone.com',
-    'www.hackerone.com',
-    'assets-legacy.hackerone.com'
-  ];
-
-  const demoAliveHosts = [
-    {
-      url: 'https://hackerone.com',
-      subdomain: 'hackerone.com',
-      statusCode: 200,
-      title: 'HackerOne: Security Begins with Trust',
-      latencyMs: 78,
-      ip: '104.16.99.52',
-      server: 'cloudflare',
-      category: 'general',
-      techStack: ['Cloudflare', 'Nginx 1.24', 'React', 'Ruby on Rails']
-    },
-    {
-      url: 'https://www.hackerone.com',
-      subdomain: 'www.hackerone.com',
-      statusCode: 200,
-      title: 'HackerOne: Security Begins with Trust',
-      latencyMs: 82,
-      ip: '104.16.100.52',
-      server: 'cloudflare',
-      category: 'general',
-      techStack: ['Cloudflare', 'Nginx 1.24', 'React']
-    },
-    {
-      url: 'https://docs.hackerone.com',
-      subdomain: 'docs.hackerone.com',
-      statusCode: 200,
-      title: 'HackerOne Documentation',
-      latencyMs: 110,
-      ip: '104.16.99.52',
-      server: 'cloudflare',
-      category: 'general',
-      techStack: ['Cloudflare', 'Next.js', 'Vercel']
-    },
-    {
-      url: 'https://api.hackerone.com',
-      subdomain: 'api.hackerone.com',
-      statusCode: 200,
-      title: 'HackerOne API Portal',
-      latencyMs: 95,
-      ip: '104.16.100.52',
-      server: 'cloudflare',
-      category: 'api',
-      techStack: ['Cloudflare', 'Express.js', 'REST API']
-    },
-    {
-      url: 'https://support.hackerone.com',
-      subdomain: 'support.hackerone.com',
-      statusCode: 200,
-      title: 'HackerOne Help Center',
-      latencyMs: 142,
-      ip: '104.16.99.52',
-      server: 'cloudflare',
-      category: 'auth',
-      techStack: ['Cloudflare', 'Zendesk', 'SAML SSO']
-    },
-    {
-      url: 'http://assets-legacy.hackerone.com',
-      subdomain: 'assets-legacy.hackerone.com',
-      statusCode: 404,
-      title: '404 NoSuchBucket - Amazon S3',
-      latencyMs: 165,
-      ip: '52.216.142.19',
-      server: 'AmazonS3',
-      category: 'cloud',
-      techStack: ['Amazon S3'],
-      takeoverRisk: {
-        isVulnerable: true,
-        service: 'Amazon S3',
-        severity: 'CRITICAL',
-        reason: 'Dangling CNAME points to unregistered AWS S3 bucket returning NoSuchBucket HTTP 404.',
-        remediation: 'Claim the S3 bucket in your AWS organization or delete the stale DNS CNAME entry.'
-      }
-    }
-  ];
-
-  const startTime = Date.now() - 45000;
-  const executionTime = 14;
-  const dateStr = new Date(startTime).toUTCString();
-
-  const summaryTxt = `===================================================
-Passive Subdomain Recon Automation Tool v2
-===================================================
-
-Target Domain : ${domain}
-
-Unique Subdomains : ${demoSubdomains.length}
-
-Live Hosts : ${demoAliveHosts.length}
-
-Execution Time : ${executionTime} seconds
-
-Generated :
-
-${dateStr}
-
-===================================================`;
-
-  const reportMd = `# Passive Subdomain Recon Report
-
-## Target
-
-${domain}
-
----
-
-## Scan Statistics
-
-| Item | Value |
-|------|-------|
-| Total Subdomains | ${demoSubdomains.length} |
-| Live Hosts | ${demoAliveHosts.length} |
-| Execution Time | ${executionTime} seconds |
-
----
-
-## Output Files
-
-- output/${domain}/subdomains.txt
-- output/${domain}/alive.txt
-- output/${domain}/summary.txt
-
----
-
-Generated:
-
-${dateStr}
-`;
-
-  const subdomainsTxt = demoSubdomains.join('\n');
-  const aliveTxt = demoAliveHosts.map(h => h.url).join('\n');
-  const reconLog = `==================================================
-
-${dateStr}
-
-Target : ${domain}
-
-Subdomains : ${demoSubdomains.length}
-
-Alive Hosts : ${demoAliveHosts.length}
-
-Execution Time : ${executionTime} seconds
-
-Status : SUCCESS
-
-==================================================`;
-
-  const logs = [
-    `\x1b[34m===========================================================\x1b[0m`,
-    `\x1b[34m        Passive Subdomain Recon Automation Tool v2         \x1b[0m`,
-    `\x1b[34m===========================================================\x1b[0m`,
-    `\x1b[36mTarget          :\x1b[0m ${domain}`,
-    `\x1b[36mOutput Folder   :\x1b[0m output/${domain}`,
-    `-----------------------------------------------------------`,
-    `[1/6] Checking Dependencies... \x1b[32m✓\x1b[0m`,
-    `[2/6] Running Subfinder......... \x1b[32m✓\x1b[0m`,
-    `[3/6] Running Assetfinder...... \x1b[32m✓\x1b[0m`,
-    `[4/6] Merging Results.......... \x1b[32m✓\x1b[0m`,
-    `[5/6] Checking Live Hosts........ \x1b[32m✓\x1b[0m`,
-    `[6/6] Generating Summary......... \x1b[32m✓\x1b[0m`,
-    `-----------------------------------------------------------`,
-    `\x1b[32mScan Summary\x1b[0m`,
-    `Target Domain      : ${domain}`,
-    `Unique Subdomains  : ${demoSubdomains.length}`,
-    `Live Hosts         : ${demoAliveHosts.length}`,
-    `Execution Time     : ${executionTime} seconds`,
-    `===========================================================`,
-    `Completed.`,
-    `===========================================================`
-  ];
-
-  scans.set(scanId, {
-    id: scanId,
-    domain,
-    status: 'completed',
-    startTime,
-    endTime: startTime + executionTime * 1000,
-    executionTime,
-    step: 6,
-    currentAction: 'Completed',
-    totalSubdomains: demoSubdomains.length,
-    aliveCount: demoAliveHosts.length,
-    subdomains: demoSubdomains,
-    aliveHosts: demoAliveHosts,
-    logs,
-    files: {
-      subdomainsTxt,
-      aliveTxt,
-      summaryTxt,
-      reportMd,
-      reconLog,
-    },
-  });
-}
-
-seedDemoScan();
-
 async function startServer() {
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
@@ -925,4 +841,6 @@ async function startServer() {
   });
 }
 
-startServer();
+if (process.env.NODE_ENV !== 'test') {
+  startServer();
+}

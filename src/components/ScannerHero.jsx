@@ -24,7 +24,7 @@ export const ScannerHero = ({ onStartScan, isScanning, errorMessage }) => {
       <div className="text-center space-y-3">
         <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-medium">
           <Zap className="w-3.5 h-3.5" />
-          <span>Automated Passive Reconnaissance</span>
+          <span>Passive Enumeration & Active HTTP Probing</span>
         </div>
         
         <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight">
@@ -99,7 +99,7 @@ export const ScannerHero = ({ onStartScan, isScanning, errorMessage }) => {
           </div>
           <h3 className="font-semibold text-sm text-white">Passive Discovery</h3>
           <p className="text-xs text-slate-400 leading-relaxed">
-            Extracts certificates and DNS records using Subfinder and AlienVault OTX feeds.
+            Extracts Certificate Transparency logs (crt.sh) and threat feeds (AlienVault OTX, HackerTarget) with zero target packet exposure.
           </p>
         </div>
 
