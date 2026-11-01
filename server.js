@@ -119,6 +119,7 @@ app.get('/api/session', (_req, res) => {
 
 // In-memory store for active and past user scans with true LRU eviction (never evicting running scans)
 export const MAX_SCANS = 30;
+export const MAX_CONCURRENT_RUNNING = 3;
 export const scans = new Map();
 const sseClients = new Map();
 
@@ -136,17 +137,13 @@ export function storeScan(scanId, scanData) {
   if (scans.has(scanId)) {
     scans.delete(scanId);
   } else if (scans.size >= MAX_SCANS) {
-    // Find oldest completed or failed scan to evict; do NOT evict running scans!
+    // Find oldest completed or failed scan to evict; running scans are strictly protected from LRU eviction
     let evictedKey = null;
     for (const [key, scan] of scans.entries()) {
       if (scan.status !== 'running') {
         evictedKey = key;
         break;
       }
-    }
-    // If all scans are running, evict oldest to avoid unbounded memory exhaustion
-    if (!evictedKey) {
-      evictedKey = scans.keys().next().value;
     }
     if (evictedKey) {
       scans.delete(evictedKey);
@@ -243,6 +240,34 @@ ipBlockList.addSubnet('fe80::', 10, 'ipv6');
 // IPv6 Multicast (ff00::/8)
 ipBlockList.addSubnet('ff00::', 8, 'ipv6');
 
+// Granular BlockLists for RFC Range Classification
+const loopbackBlockList = new net.BlockList();
+loopbackBlockList.addSubnet('127.0.0.0', 8, 'ipv4');
+loopbackBlockList.addAddress('::1', 'ipv6');
+
+const imdsBlockList = new net.BlockList();
+imdsBlockList.addSubnet('169.254.0.0', 16, 'ipv4');
+imdsBlockList.addSubnet('fe80::', 10, 'ipv6');
+
+const rfc1918BlockList = new net.BlockList();
+rfc1918BlockList.addSubnet('10.0.0.0', 8, 'ipv4');
+rfc1918BlockList.addSubnet('172.16.0.0', 12, 'ipv4');
+rfc1918BlockList.addSubnet('192.168.0.0', 16, 'ipv4');
+rfc1918BlockList.addSubnet('fc00::', 7, 'ipv6');
+
+const cgnatBlockList = new net.BlockList();
+cgnatBlockList.addSubnet('100.64.0.0', 10, 'ipv4');
+
+const reservedBlockList = new net.BlockList();
+reservedBlockList.addSubnet('224.0.0.0', 4, 'ipv4');
+reservedBlockList.addSubnet('240.0.0.0', 4, 'ipv4');
+reservedBlockList.addSubnet('0.0.0.0', 8, 'ipv4');
+reservedBlockList.addSubnet('192.0.0.0', 24, 'ipv4');
+reservedBlockList.addSubnet('198.18.0.0', 15, 'ipv4');
+reservedBlockList.addAddress('255.255.255.255', 'ipv4');
+reservedBlockList.addAddress('::', 'ipv6');
+reservedBlockList.addSubnet('ff00::', 8, 'ipv6');
+
 // Helper: Expands an IPv6 address into 8 16-bit integer words
 export function expandIPv6ToWords(ipStr) {
   let str = String(ipStr || '').toLowerCase();
@@ -284,6 +309,34 @@ export function expandIPv6ToWords(ipStr) {
   return words;
 }
 
+// Helper: Unwraps embedded IPv4 from IPv4-mapped, IPv4-compatible, NAT64, or 6to4 encapsulation
+export function unwrapEmbeddedIPv4(clean) {
+  const ver = net.isIP(clean);
+  if (ver === 4) return clean;
+  if (ver === 6) {
+    const words = expandIPv6ToWords(clean);
+    if (!words) return null;
+    // 1. IPv4-Mapped IPv6 (::ffff:0:0/96)
+    if (words[0] === 0 && words[1] === 0 && words[2] === 0 && words[3] === 0 && words[4] === 0 && words[5] === 0xffff) {
+      return `${words[6] >> 8}.${words[6] & 0xff}.${words[7] >> 8}.${words[7] & 0xff}`;
+    }
+    // 2. IPv4-Compatible IPv6 (::0:0/96)
+    if (words[0] === 0 && words[1] === 0 && words[2] === 0 && words[3] === 0 && words[4] === 0 && words[5] === 0) {
+      if ((words[6] === 0 && words[7] === 0) || (words[6] === 0 && words[7] === 1)) return null;
+      return `${words[6] >> 8}.${words[6] & 0xff}.${words[7] >> 8}.${words[7] & 0xff}`;
+    }
+    // 3. NAT64 Well-Known Prefix (64:ff9b::/96)
+    if (words[0] === 0x0064 && words[1] === 0xff9b && words[2] === 0 && words[3] === 0 && words[4] === 0 && words[5] === 0) {
+      return `${words[6] >> 8}.${words[6] & 0xff}.${words[7] >> 8}.${words[7] & 0xff}`;
+    }
+    // 4. 6to4 Anycast / Encapsulation (2002::/16)
+    if (words[0] === 0x2002) {
+      return `${words[1] >> 8}.${words[1] & 0xff}.${words[2] >> 8}.${words[2] & 0xff}`;
+    }
+  }
+  return null;
+}
+
 // Evaluates an IP against RFC ranges.
 // CRITICAL: FAILS CLOSED. Any unparseable string, garbage, null, or invalid IP returns true (blocked).
 export function isPrivateOrReservedIp(ip) {
@@ -296,8 +349,9 @@ export function isPrivateOrReservedIp(ip) {
     return true;
   }
 
-  if (ver === 4) {
-    return ipBlockList.check(clean, 'ipv4');
+  const v4 = unwrapEmbeddedIPv4(clean);
+  if (v4) {
+    return ipBlockList.check(v4, 'ipv4');
   }
 
   if (ver === 6) {
@@ -305,35 +359,6 @@ export function isPrivateOrReservedIp(ip) {
     if (!words) {
       return true; // Fail closed
     }
-
-    // 1. IPv4-Mapped IPv6 (::ffff:0:0/96)
-    if (words[0] === 0 && words[1] === 0 && words[2] === 0 && words[3] === 0 && words[4] === 0 && words[5] === 0xffff) {
-      const v4 = `${words[6] >> 8}.${words[6] & 0xff}.${words[7] >> 8}.${words[7] & 0xff}`;
-      return ipBlockList.check(v4, 'ipv4');
-    }
-
-    // 2. IPv4-Compatible IPv6 (::0:0/96) - RFC 4291
-    if (words[0] === 0 && words[1] === 0 && words[2] === 0 && words[3] === 0 && words[4] === 0 && words[5] === 0) {
-      if (words[6] === 0 && words[7] === 0) return true; // :: unspecified
-      if (words[6] === 0 && words[7] === 1) return true; // ::1 loopback
-      const v4 = `${words[6] >> 8}.${words[6] & 0xff}.${words[7] >> 8}.${words[7] & 0xff}`;
-      return ipBlockList.check(v4, 'ipv4');
-    }
-
-    // 3. NAT64 Well-Known Prefix (64:ff9b::/96) - RFC 6052
-    if (words[0] === 0x0064 && words[1] === 0xff9b && words[2] === 0 && words[3] === 0 && words[4] === 0 && words[5] === 0) {
-      const v4 = `${words[6] >> 8}.${words[6] & 0xff}.${words[7] >> 8}.${words[7] & 0xff}`;
-      return ipBlockList.check(v4, 'ipv4');
-    }
-
-    // 4. 6to4 Anycast / Encapsulation (2002::/16) - RFC 3056
-    // Bits 16..47 encode the embedded IPv4 address (words[1] and words[2])
-    if (words[0] === 0x2002) {
-      const v4 = `${words[1] >> 8}.${words[1] & 0xff}.${words[2] >> 8}.${words[2] & 0xff}`;
-      return ipBlockList.check(v4, 'ipv4');
-    }
-
-    // 5. Standard IPv6 BlockList (::1, ::, fc00::/7 ULA, fe80::/10 link-local, ff00::/8 multicast)
     return ipBlockList.check(clean, 'ipv6');
   }
 
@@ -682,24 +707,22 @@ const TAKEOVER_SERVICES = [
       'for root urls you must provide an index.html file',
     ],
     severity: 'HIGH',
+    perResourceDns: false, // Shared anycast IP pool resolves wildcard DNS for all subdomains
     confirmedReason: 'Dangling CNAME points to unclaimed GitHub Pages repository.',
     remediation: 'Claim the GitHub repository or delete the stale DNS CNAME entry.',
   },
   {
     service: 'Amazon S3',
-    // Exact S3 suffixes only; never broad .amazonaws.com which falsely flags ELBs (*.elb.amazonaws.com)
-    cnameSuffixes: [
-      '.s3.amazonaws.com',
-      '.s3-website.amazonaws.com',
-      '.s3-website-us-east-1.amazonaws.com',
-      '.s3-website.us-east-1.amazonaws.com',
-      '.s3.dualstack.us-east-1.amazonaws.com',
-    ],
+    // Comprehensive regex covering standard, regional, and website endpoints worldwide
+    // Excludes generic *.amazonaws.com and *.elb.amazonaws.com to eliminate false positives
+    cnameRegex: /^(?:[a-z0-9.-]+\.)?s3(?:[\.-]website)?(?:[\.-][a-z0-9-]+)?\.amazonaws\.com$/i,
+    cnameSuffixes: ['.s3.amazonaws.com'],
     fingerprints: [
       'the specified bucket does not exist',
       'nosuchbucket',
     ],
     severity: 'CRITICAL',
+    perResourceDns: false, // S3 resolves wildcard IPs for any bucket hostname
     confirmedReason: 'Dangling CNAME points to deleted or unregistered S3 bucket.',
     remediation: 'Claim the S3 bucket in your AWS account or delete the CNAME record.',
   },
@@ -708,6 +731,7 @@ const TAKEOVER_SERVICES = [
     cnameSuffixes: ['.elasticbeanstalk.com'],
     fingerprints: [],
     severity: 'HIGH',
+    perResourceDns: true, // Elastic Beanstalk terminates per-resource DNS records (NXDOMAIN on release)
     confirmedReason: 'Dangling CNAME points to deleted or released Elastic Beanstalk environment (NXDOMAIN).',
     remediation: 'Claim the Elastic Beanstalk environment name in AWS or delete the CNAME record.',
   },
@@ -718,6 +742,7 @@ const TAKEOVER_SERVICES = [
       '404 web app not found',
     ],
     severity: 'HIGH',
+    perResourceDns: true, // Azure Web App tears down specific subdomain DNS on de-allocation (NXDOMAIN)
     confirmedReason: 'Dangling CNAME points to unregistered or deleted Azure Web App.',
     remediation: 'Claim the Web App hostname in Azure App Service or delete the DNS record.',
   },
@@ -726,6 +751,7 @@ const TAKEOVER_SERVICES = [
     cnameSuffixes: ['.trafficmanager.net'],
     fingerprints: [],
     severity: 'HIGH',
+    perResourceDns: true, // Deleted Traffic Manager profile returns NXDOMAIN
     confirmedReason: 'Dangling CNAME points to non-existent Azure Traffic Manager profile (NXDOMAIN).',
     remediation: 'Recreate the Traffic Manager profile in Azure or remove the CNAME.',
   },
@@ -736,6 +762,7 @@ const TAKEOVER_SERVICES = [
       'fastly error: unknown domain',
     ],
     severity: 'MEDIUM',
+    perResourceDns: false, // Fastly uses shared anycast IPs
     confirmedReason: 'Dangling CNAME points to unclaimed Fastly CDN service.',
     remediation: 'Add the domain to your Fastly service or remove the CNAME.',
   },
@@ -747,6 +774,7 @@ const TAKEOVER_SERVICES = [
       'no such app',
     ],
     severity: 'HIGH',
+    perResourceDns: false, // Heroku routes via shared ingress
     confirmedReason: 'Dangling CNAME points to released Heroku application.',
     remediation: 'Claim the Heroku app name or remove DNS record.',
   },
@@ -757,6 +785,7 @@ const TAKEOVER_SERVICES = [
       'the thing you were looking for is no longer here',
     ],
     severity: 'MEDIUM',
+    perResourceDns: false,
     confirmedReason: 'Dangling CNAME points to unclaimed Ghost blog.',
     remediation: 'Claim the Ghost blog or delete the CNAME record.',
   },
@@ -768,6 +797,7 @@ const TAKEOVER_SERVICES = [
       'no such sub-domain',
     ],
     severity: 'MEDIUM',
+    perResourceDns: false,
     confirmedReason: 'Unclaimed Zendesk helpdesk CNAME.',
     remediation: 'Claim Zendesk pod or remove CNAME.',
   },
@@ -778,6 +808,7 @@ const TAKEOVER_SERVICES = [
       'sorry, this shop is currently unavailable',
     ],
     severity: 'MEDIUM',
+    perResourceDns: false,
     confirmedReason: 'Unclaimed Shopify store CNAME.',
     remediation: 'Claim the store name in Shopify or remove CNAME.',
   },
@@ -788,6 +819,7 @@ const TAKEOVER_SERVICES = [
       'project not found',
     ],
     severity: 'LOW',
+    perResourceDns: false,
     confirmedReason: 'Dangling CNAME points to unclaimed Surge domain.',
     remediation: 'Publish project to Surge or remove DNS record.',
   },
@@ -819,38 +851,43 @@ export async function checkTakeoverRisk(
   }
 
   for (const item of TAKEOVER_SERVICES) {
-    // Match suffix against any CNAME in the chain using strict endsWith or exact match
-    const matchingCname = normalizedCnames.find(cname =>
-      item.cnameSuffixes.some(suffix => {
+    // Match suffix against any CNAME in the chain using regex or strict suffix
+    const matchingCname = normalizedCnames.find(cname => {
+      if (item.cnameRegex && item.cnameRegex.test(cname)) {
+        return true;
+      }
+      return item.cnameSuffixes?.some(suffix => {
         const cleanSuffix = suffix.toLowerCase().replace(/^\./, '');
         return cname === cleanSuffix || cname.endsWith(`.${cleanSuffix}`);
-      })
-    );
+      });
+    });
 
     const bodyMatches = b.length > 0 && item.fingerprints.some(fp => b.includes(fp));
 
     if (matchingCname) {
-      // Check the most reliable dangling signal: CNAME target produces NXDOMAIN
-      let targetNxDomain = false;
-      try {
-        await targetResolverFn(matchingCname);
-      } catch (err) {
-        // Only count genuine NXDOMAIN (Node's ENOTFOUND). Drop ESERVFAIL and NODATA so resolver flakiness never produces false positives.
-        if (err && err.code === 'ENOTFOUND') {
-          targetNxDomain = true;
+      // Per-Resource DNS verification: Only test target DNS when the provider terminates records per resource
+      if (item.perResourceDns) {
+        let targetNxDomain = false;
+        try {
+          await targetResolverFn(matchingCname);
+        } catch (err) {
+          // Only count genuine NXDOMAIN (Node's ENOTFOUND). Drop ESERVFAIL so resolver flakiness never produces false positives.
+          if (err && err.code === 'ENOTFOUND') {
+            targetNxDomain = true;
+          }
         }
-      }
 
-      if (targetNxDomain) {
-        return {
-          isVulnerable: true,
-          certainty: 'Likely',
-          service: item.service,
-          cname: matchingCname,
-          severity: item.severity,
-          reason: `Dangling CNAME points to NXDOMAIN target (${matchingCname}). Target resource does not exist in DNS and is susceptible to registration hijack.`,
-          remediation: `Remove the dangling CNAME record for ${subdomain} or register the target resource with ${item.service}.`,
-        };
+        if (targetNxDomain) {
+          return {
+            isVulnerable: true,
+            certainty: 'Likely',
+            service: item.service,
+            cname: matchingCname,
+            severity: item.severity,
+            reason: `Dangling CNAME points to NXDOMAIN target (${matchingCname}). Per-resource DNS confirms the target environment does not exist and is susceptible to registration hijack.`,
+            remediation: `Remove the dangling CNAME record for ${subdomain} or register the target resource with ${item.service}.`,
+          };
+        }
       }
 
       if (bodyMatches && (statusCode === 404 || statusCode === 0 || statusCode === 502 || statusCode === 503)) {
@@ -880,7 +917,7 @@ export async function checkTakeoverRisk(
   return null;
 }
 
-// Differentiates internal/reserved IPs by range with accurate severity tiers
+// Differentiates internal/reserved IPs by range using net.BlockList (failure-proof, no string prefixes)
 export function classifyIpRisk(ip) {
   if (!ip || typeof ip !== 'string') {
     return {
@@ -892,75 +929,44 @@ export function classifyIpRisk(ip) {
   }
 
   const clean = ip.trim().toLowerCase();
-
-  // 1. Loopback addresses (127.0.0.0/8, ::1, 0:0:0:0:0:0:0:1)
-  if (
-    clean === '127.0.0.1' ||
-    clean.startsWith('127.') ||
-    clean === '::1' ||
-    clean === '0:0:0:0:0:0:0:1' ||
-    clean === '::ffff:127.0.0.1' ||
-    clean === '::ffff:7f00:1'
-  ) {
+  const ver = net.isIP(clean);
+  if (ver === 0) {
     return {
-      severity: 'INFO',
-      title: 'Localhost / Loopback Mapping',
-      reason: 'Subdomain maps to loopback interface. Often deliberate for local development, split-horizon routing, or desktop client sync (e.g. localhost.target.com -> 127.0.0.1).',
-      remediation: 'Ensure loopback mapping is intentional and does not expose local services to cross-origin abuse.',
+      severity: 'LOW',
+      title: 'Reserved Internal Address',
+      reason: 'Unparseable or unknown IP address representation.',
+      remediation: 'Verify DNS record validity.',
     };
   }
 
-  // 2. Cloud Instance Metadata Service (IMDS) & Link-Local (169.254.0.0/16, fe80::/10)
-  if (
-    clean.startsWith('169.254.') ||
-    clean === '::ffff:169.254.169.254' ||
-    clean.startsWith('fe8') ||
-    clean.startsWith('fe9') ||
-    clean.startsWith('fea') ||
-    clean.startsWith('feb')
-  ) {
-    return {
-      severity: 'HIGH',
-      title: 'Link-Local / Cloud IMDS Mapping',
-      reason: 'Subdomain resolves to link-local or Cloud Instance Metadata Service (IMDS) range (169.254.169.254). Potential SSRF jump-point if requested by cloud workloads.',
-      remediation: 'Remove link-local or IMDS IP mappings from public DNS zones immediately.',
-    };
-  }
-
-  // 3. RFC 1918 Private Ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) & IPv6 ULA (fc00::/7 - fc.. and fd..)
-  if (
-    clean.startsWith('10.') ||
-    clean.startsWith('192.168.') ||
-    clean.startsWith('fc') ||
-    clean.startsWith('fd')
-  ) {
-    return {
-      severity: 'MEDIUM',
-      title: 'Internal IP Leak / RFC 1918 Exposure',
-      reason: 'Subdomain resolves to internal private network address space, disclosing internal network topology in public DNS.',
-      remediation: 'Remove internal IP mappings from public DNS zones or use split-horizon DNS to keep private IPs restricted to internal resolvers.',
-    };
-  }
-
-  // Check 172.16.0.0/12 (172.16.x.x through 172.31.x.x)
-  if (clean.startsWith('172.')) {
-    const parts = clean.split('.');
-    const second = parseInt(parts[1], 10);
-    if (!isNaN(second) && second >= 16 && second <= 31) {
+  // Check if an embedded IPv4 address is present (unwrapping ::ffff:, 64:ff9b::, 2002::, etc.)
+  const v4 = unwrapEmbeddedIPv4(clean);
+  if (v4) {
+    if (loopbackBlockList.check(v4, 'ipv4')) {
+      return {
+        severity: 'INFO',
+        title: 'Localhost / Loopback Mapping',
+        reason: 'Subdomain maps to loopback interface. Often deliberate for local development, split-horizon routing, or desktop client sync (e.g. localhost.target.com -> 127.0.0.1).',
+        remediation: 'Ensure loopback mapping is intentional and does not expose local services to cross-origin abuse.',
+      };
+    }
+    if (imdsBlockList.check(v4, 'ipv4')) {
+      return {
+        severity: 'HIGH',
+        title: 'Link-Local / Cloud IMDS Mapping',
+        reason: 'Subdomain resolves to link-local or Cloud Instance Metadata Service (IMDS) range (169.254.169.254). Potential SSRF jump-point if requested by cloud workloads.',
+        remediation: 'Remove link-local or IMDS IP mappings from public DNS zones immediately.',
+      };
+    }
+    if (rfc1918BlockList.check(v4, 'ipv4')) {
       return {
         severity: 'MEDIUM',
         title: 'Internal IP Leak / RFC 1918 Exposure',
-        reason: 'Subdomain resolves to internal RFC 1918 address space (172.16.0.0/12), disclosing internal network topology in public DNS.',
-        remediation: 'Remove internal IP mappings from public DNS zones or use split-horizon DNS.',
+        reason: 'Subdomain resolves to internal private network address space, disclosing internal network topology in public DNS.',
+        remediation: 'Remove internal IP mappings from public DNS zones or use split-horizon DNS to keep private IPs restricted to internal resolvers.',
       };
     }
-  }
-
-  // 4. Carrier-Grade NAT (CGNAT) 100.64.0.0/10 (100.64.0.0 - 100.127.255.255)
-  if (clean.startsWith('100.')) {
-    const parts = clean.split('.');
-    const second = parseInt(parts[1], 10);
-    if (!isNaN(second) && second >= 64 && second <= 127) {
+    if (cgnatBlockList.check(v4, 'ipv4')) {
       return {
         severity: 'LOW',
         title: 'Carrier-Grade NAT Address (RFC 6598)',
@@ -968,23 +974,50 @@ export function classifyIpRisk(ip) {
         remediation: 'Review DNS configuration to confirm whether shared carrier address allocation is intentional.',
       };
     }
+    if (reservedBlockList.check(v4, 'ipv4')) {
+      return {
+        severity: 'LOW',
+        title: 'Reserved / Multicast IP Address',
+        reason: 'Subdomain resolves to multicast, broadcast, or IETF reserved address range.',
+        remediation: 'Update DNS record to point to a valid public unicast IP address.',
+      };
+    }
   }
 
-  // 5. Multicast / Broadcast / Reserved (224.0.0.0/4, 240.0.0.0/4, 0.0.0.0/8, ff00::/8, 255.255.255.255)
-  if (
-    clean.startsWith('0.') ||
-    clean.startsWith('224.') ||
-    clean.startsWith('240.') ||
-    clean.startsWith('ff') ||
-    clean === '255.255.255.255' ||
-    clean === '::'
-  ) {
-    return {
-      severity: 'LOW',
-      title: 'Reserved / Multicast IP Address',
-      reason: 'Subdomain resolves to multicast, broadcast, or IETF reserved address range.',
-      remediation: 'Update DNS record to point to a valid public unicast IP address.',
-    };
+  // Native IPv6 evaluation
+  if (ver === 6) {
+    if (loopbackBlockList.check(clean, 'ipv6')) {
+      return {
+        severity: 'INFO',
+        title: 'Localhost / Loopback Mapping',
+        reason: 'Subdomain maps to IPv6 loopback (::1). Often deliberate for local development or split-horizon routing.',
+        remediation: 'Ensure loopback mapping is intentional and does not expose local services to cross-origin abuse.',
+      };
+    }
+    if (imdsBlockList.check(clean, 'ipv6')) {
+      return {
+        severity: 'HIGH',
+        title: 'Link-Local / Cloud IMDS Mapping',
+        reason: 'Subdomain resolves to IPv6 link-local unicast range (fe80::/10).',
+        remediation: 'Remove link-local IP mappings from public DNS zones immediately.',
+      };
+    }
+    if (rfc1918BlockList.check(clean, 'ipv6')) {
+      return {
+        severity: 'MEDIUM',
+        title: 'Internal IP Leak / RFC 1918 Exposure',
+        reason: 'Subdomain resolves to IPv6 Unique Local Address range (fc00::/7), disclosing internal network topology.',
+        remediation: 'Remove internal ULA mappings from public DNS zones or use split-horizon DNS.',
+      };
+    }
+    if (reservedBlockList.check(clean, 'ipv6')) {
+      return {
+        severity: 'LOW',
+        title: 'Reserved / Multicast IP Address',
+        reason: 'Subdomain resolves to IPv6 multicast (ff00::/8) or unspecified address range.',
+        remediation: 'Update DNS record to point to a valid public unicast IP address.',
+      };
+    }
   }
 
   return {
@@ -1377,6 +1410,17 @@ app.post('/api/recon/start', async (req, res) => {
     });
   }
 
+  // Concurrency throttle: prevent background resource exhaustion
+  let activeRunningCount = 0;
+  for (const s of scans.values()) {
+    if (s.status === 'running') activeRunningCount++;
+  }
+  if (activeRunningCount >= MAX_CONCURRENT_RUNNING) {
+    return res.status(429).json({
+      error: `Too Many Requests: Maximum concurrent active scans reached (${MAX_CONCURRENT_RUNNING}). Please wait for an active scan to complete.`,
+    });
+  }
+
   const rawDomain = req.body?.domain;
   if (!rawDomain) {
     return res.status(400).json({ error: 'Target domain is required (e.g. example.com)' });
@@ -1422,13 +1466,10 @@ app.post('/api/recon/start', async (req, res) => {
   return res.json({ scanId, domain, status: 'running' });
 });
 
+// Read Endpoints: Protected by Inbound Host Header validation (preventing DNS rebinding)
+// and strict CORS exact-origin matching (enforcing browser Same-Origin Policy isolation).
 app.get('/api/recon/stream/:scanId', (req, res) => {
   const { scanId } = req.params;
-  const token = req.headers['x-reconforge-session'] || req.query?.token;
-  if (token && !isTokenValid(token)) {
-    return res.status(403).json({ error: 'Forbidden: Invalid session token' });
-  }
-
   const scan = getScan(scanId);
 
   res.setHeader('Content-Type', 'text/event-stream');
@@ -1460,22 +1501,12 @@ app.get('/api/recon/stream/:scanId', (req, res) => {
 
 app.get('/api/recon/scan/:scanId', (req, res) => {
   const { scanId } = req.params;
-  const token = req.headers['x-reconforge-session'] || req.query?.token;
-  if (token && !isTokenValid(token)) {
-    return res.status(403).json({ error: 'Forbidden: Invalid session token' });
-  }
-
   const scan = getScan(scanId);
   if (!scan) return res.status(404).json({ error: 'Scan not found' });
   return res.json(scan);
 });
 
-app.get('/api/recon/history', (req, res) => {
-  const token = req.headers['x-reconforge-session'] || req.query?.token;
-  if (token && !isTokenValid(token)) {
-    return res.status(403).json({ error: 'Forbidden: Invalid session token' });
-  }
-
+app.get('/api/recon/history', (_req, res) => {
   const list = Array.from(scans.values()).map(s => ({
     id: s.id,
     domain: s.domain,
@@ -1491,11 +1522,6 @@ app.get('/api/recon/history', (req, res) => {
 
 app.get('/api/recon/download/:scanId/:fileType', (req, res) => {
   const { scanId, fileType } = req.params;
-  const token = req.headers['x-reconforge-session'] || req.query?.token;
-  if (token && !isTokenValid(token)) {
-    return res.status(403).send('Forbidden: Invalid session token');
-  }
-
   const scan = getScan(scanId);
   if (!scan) return res.status(404).send('Scan not found');
 
