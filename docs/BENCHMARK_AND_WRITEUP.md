@@ -32,6 +32,12 @@ ReconForge uses a **dual-stage discovery pipeline** separating non-intrusive int
 [ Stage 6: Export & Visuals ] ── Markdown report, summary.txt, alive.txt, Canvas Topology
 ```
 
+<p align="center">
+  <img src="screenshots/topology-graph.png" alt="ReconForge Attack Surface Topology Constellation Graph" width="800" />
+  <br>
+  <em>Figure 1: ReconForge HTML5 Canvas topology constellation, clustering discovered endpoints around the apex target hub by infrastructure tier.</em>
+</p>
+
 ---
 
 ## 3. What We Broke and How We Fixed It (Engineering Postmortem)

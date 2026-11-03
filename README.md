@@ -6,11 +6,64 @@
 
 An automated attack surface mapping and service probing suite for security researchers, bug bounty hunters, and penetration testers.
 
+<p align="center">
+  <img src="docs/screenshots/reconforge-hero.png" alt="ReconForge Desktop Interface v2.1" width="880" />
+</p>
+
 ReconForge features a **dual-engine architecture**:
 1. **Native Node.js Engine & Desktop GUI**: A standalone, zero-Go-dependency engine featuring an interactive React (JSX) dashboard, HTML5 Canvas topology graph, real-time ANSI terminal streaming via Server-Sent Events (SSE), fail-closed SSRF defenses (`net.BlockList` + connect-time lookup), inbound DNS rebinding protection (Host header validation), and takeover risk detection with CNAME NXDOMAIN verification.
 2. **Classic Bash CLI Pipeline**: The standalone script suite (`recon.sh`, `functions.sh`, `config.sh`) for headless terminal environments orchestrating standard Linux tools (`subfinder`, `assetfinder`, `httpx`).
 
 ---
+
+## Screenshots & Interface Tour
+
+ReconForge pairs an automated reconnaissance engine with a high-fidelity desktop workspace for security researchers:
+
+| Interface View | Screenshot | Capabilities |
+| :--- | :--- | :--- |
+| **01. Scope & Launch** | [![Scope & Launch](docs/screenshots/reconforge-hero.png)](docs/screenshots/reconforge-hero.png) | Single-click authorized target presets, RFC 1035 & Punycode IDN syntax normalization, and instant passive discovery launch. |
+| **02. Multi-Stage Pipeline** | [![Multi-Stage Pipeline](docs/screenshots/scan-progress.png)](docs/screenshots/scan-progress.png) | Real-time 5-stage progress indicator with ETA, dynamic stage checklists, and live Server-Sent Events (SSE) terminal streaming. |
+| **03. Attack Surface Topology** | [![Attack Surface Topology](docs/screenshots/topology-graph.png)](docs/screenshots/topology-graph.png) | Interactive HTML5 Canvas constellation map clustering discovered assets into functional tiers (Apex Hub, Web Apps, APIs, Cloud/CDN, Auth & Portals, Internal/Dev) with zoom, pan, and filter controls. |
+| **04. Live Host Probing** | [![Live Host Probing](docs/screenshots/live-websites.png)](docs/screenshots/live-websites.png) | Live web server grid featuring HTTP/HTTPS status codes, response latencies, HTML `<title>` tags, dual-stack IP addresses, and technology fingerprints. |
+| **05. Subdomain Inventory** | [![Subdomain Inventory](docs/screenshots/subdomains-inventory.png)](docs/screenshots/subdomains-inventory.png) | Complete deduplicated FQDN inventory with instant text search, prefix badges, and one-click export to clipboard, `subdomains.txt`, `alive.txt`, or Markdown. |
+
+### Visual Walkthrough
+
+#### 1. Scope & Target Entry
+Enter any target apex domain or select an authorized scope preset (e.g. HackerOne, Mozilla, OWASP, GitHub). The system normalizes inputs, strips accidental protocol wrappers, and checks system resolver responsiveness before starting.
+
+<p align="center">
+  <img src="docs/screenshots/reconforge-hero.png" alt="Target Scope and Discovery Launch" width="850" />
+</p>
+
+#### 2. Live Reconnaissance Pipeline & Terminal Stream
+As the scan executes, the interface provides continuous feedback across Certificate Transparency mining (`crt.sh`), threat intelligence ingestion (AlienVault OTX, HackerTarget), dual-stack canary wildcard tests, and active HTTP/TLS service probing.
+
+<p align="center">
+  <img src="docs/screenshots/scan-progress.png" alt="Active Multi-Stage Reconnaissance Progress" width="850" />
+</p>
+
+#### 3. Interactive Attack Surface Topology Graph
+The HTML5 Canvas constellation graph visualizes infrastructure relationships, automatically clustering discovered endpoints around the central target hub according to their operational role (Web Applications, API Services, Cloud/CDN, Auth & Portals, and Internal/Dev services). Researchers can zoom, pan, and filter nodes dynamically.
+
+<p align="center">
+  <img src="docs/screenshots/topology-graph.png" alt="Interactive Attack Surface Topology Constellation Graph" width="850" />
+</p>
+
+#### 4. Live Host Probing & Technology Detection
+Discovered endpoints are verified with socket-level SSRF guards and presented in an interactive card grid with status codes, genuine round-trip latencies, server banners, extracted page titles, and detected web technologies.
+
+<p align="center">
+  <img src="docs/screenshots/live-websites.png" alt="Live Host Probing and Tech Stack Detection Grid" width="850" />
+</p>
+
+#### 5. Subdomain Inventory & Instant Export
+The complete deduplicated asset list provides real-time search, classification badges, and one-click export to clipboard, `subdomains.txt`, `alive.txt`, or structured penetration testing Markdown reports (`report.md`).
+
+<p align="center">
+  <img src="docs/screenshots/subdomains-inventory.png" alt="All Subdomains Inventory and Export View" width="850" />
+</p>
 
 ## Technical Pipeline: Passive Enumeration & Active Probing
 
