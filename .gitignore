@@ -1,6 +1,7 @@
 node_modules/
 dist/
 bun.lock
+public/assets/aistudio/
 
 # ----------------------------
 # Generated Scan Results
