@@ -1443,13 +1443,16 @@ app.post('/api/recon/start', async (req, res) => {
 
   storeScan(scanId, scanData);
 
-  executeReconWorkflow(scanData).catch((err) => {
-    console.error('Workflow error:', err);
-    scanData.status = 'failed';
-    scanData.error = err?.message || 'Workflow execution error';
-    appendLog(scanData, `\x1b[31m[ERROR] Scan failed: ${scanData.error}\x1b[0m`);
-    broadcastScanUpdate(scanData.id, scanData);
-  });
+  // In automated test environments, avoid spawning unmocked live OSINT scans against public targets
+  if (process.env.NODE_ENV !== 'test') {
+    executeReconWorkflow(scanData).catch((err) => {
+      console.error('Workflow error:', err);
+      scanData.status = 'failed';
+      scanData.error = err?.message || 'Workflow execution error';
+      appendLog(scanData, `\x1b[31m[ERROR] Scan failed: ${scanData.error}\x1b[0m`);
+      broadcastScanUpdate(scanData.id, scanData);
+    });
+  }
 
   return res.json({ scanId, domain, status: 'running' });
 });

@@ -1,6 +1,6 @@
 # ReconForge -- Subdomain Reconnaissance & Active Service Probing (v2.1)
 
-[![CI Test & Build](https://github.com/reconforge/reconforge/actions/workflows/ci.yml/badge.svg)](https://github.com/reconforge/reconforge/actions/workflows/ci.yml)
+[![CI Test & Build](https://github.com/c00k3r/Subdomain-Automation/actions/workflows/ci.yml/badge.svg)](https://github.com/c00k3r/Subdomain-Automation/actions/workflows/ci.yml)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
 [![Dependabot](https://img.shields.io/badge/dependabot-enabled-blue.svg)](.github/dependabot.yml)
 
