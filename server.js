@@ -715,7 +715,8 @@ const TAKEOVER_SERVICES = [
     service: 'Amazon S3',
     // Comprehensive regex covering standard, regional, and website endpoints worldwide
     // Excludes generic *.amazonaws.com and *.elb.amazonaws.com to eliminate false positives
-    cnameRegex: /^(?:[a-z0-9.-]+\.)?s3(?:[\.-]website)?(?:[\.-][a-z0-9-]+)?\.amazonaws\.com$/i,
+    // Tightened region group prevents arbitrary matching such as s3-evil.amazonaws.com
+    cnameRegex: /^(?:[a-z0-9.-]+\.)?s3(?:(?:\.[a-z0-9-]+)?|-website[.-][a-z0-9-]+|-(?:[a-z]{2,}-[a-z]+-\d+))?\.amazonaws\.com$/i,
     cnameSuffixes: ['.s3.amazonaws.com'],
     fingerprints: [
       'the specified bucket does not exist',
@@ -918,25 +919,16 @@ export async function checkTakeoverRisk(
 }
 
 // Differentiates internal/reserved IPs by range using net.BlockList (failure-proof, no string prefixes)
+// Returns null for public unicast IPs, unparseable inputs, or invalid addresses
 export function classifyIpRisk(ip) {
   if (!ip || typeof ip !== 'string') {
-    return {
-      severity: 'LOW',
-      title: 'Reserved Internal Address',
-      reason: 'Unparseable or unknown IP address representation.',
-      remediation: 'Verify DNS record validity.',
-    };
+    return null;
   }
 
   const clean = ip.trim().toLowerCase();
   const ver = net.isIP(clean);
   if (ver === 0) {
-    return {
-      severity: 'LOW',
-      title: 'Reserved Internal Address',
-      reason: 'Unparseable or unknown IP address representation.',
-      remediation: 'Verify DNS record validity.',
-    };
+    return null;
   }
 
   // Check if an embedded IPv4 address is present (unwrapping ::ffff:, 64:ff9b::, 2002::, etc.)
@@ -1020,12 +1012,8 @@ export function classifyIpRisk(ip) {
     }
   }
 
-  return {
-    severity: 'LOW',
-    title: 'Reserved Internal Address',
-    reason: 'Subdomain resolves to a reserved internal network address.',
-    remediation: 'Update DNS record to point to a valid public IP address.',
-  };
+  // Unknown or public unicast IP address returns null (no internal risk)
+  return null;
 }
 
 // Active Host Prober with Dual IPv4/IPv6, Real DNS Latency, and SSRF Defense

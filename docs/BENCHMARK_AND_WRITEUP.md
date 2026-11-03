@@ -1,10 +1,10 @@
-# ReconForge Technical Write-Up & Benchmark Report
+# ReconForge Engineering Architecture & Technical Postmortem
 
 ## 1. Executive Summary & Purpose
 
-ReconForge was conceived to solve a recurring friction in offensive security workflows: running reconnaissance on client targets or internal networks typically requires configuring complex Go toolchains (`subfinder`, `assetfinder`, `httpx`, `nuclei`), managing external binary PATHs, and manually correlating output files into reports.
+ReconForge was conceived to solve a recurring operational friction in offensive security workflows: running reconnaissance and surface mapping on client targets typically requires configuring external toolchains (`subfinder`, `assetfinder`, `httpx`), managing external binary PATHs, and manually correlating output files into reports.
 
-Our goal was to build a **zero-dependency, native Node.js reconnaissance and service-probing engine** paired with a real-time reactive desktop GUI that matches the discovery performance of industry-standard CLI tools, while strictly safeguarding the researcher's host environment against Server-Side Request Forgery (SSRF), DNS rebinding, and cross-origin scanner hijacking.
+Our goal was to build a **native Node.js reconnaissance and service-probing engine** (requiring no external Go or Python binaries) paired with a real-time reactive desktop GUI, while strictly safeguarding the researcher's host environment against Server-Side Request Forgery (SSRF), DNS rebinding, and cross-origin scanner hijacking.
 
 ---
 
@@ -55,12 +55,13 @@ During our iterative hardening process, we uncovered and systematically eliminat
 ### Issue D: Subdomain Takeover Signal Calibration
 - **What Was Broken**: Dead CNAMEs pointing to `*.amazonaws.com` (such as decommissioned ELBs) were reported as "Critical S3 Takeovers". Furthermore, checking NXDOMAIN on shared anycast providers (like GitHub Pages or S3) yielded false assumptions, while resolver timeouts (`ESERVFAIL`) produced phantom takeover warnings.
 - **The Fix**:
-  1. Implemented a strict regional S3 regex (`/^(?:[a-z0-9.-]+\.)?s3(?:[\.-]website)?(?:[\.-][a-z0-9-]+)?\.amazonaws\.com$/i`) that explicitly excludes ELB domains.
+  1. Implemented a tightened regional S3 regex (`/^(?:[a-z0-9.-]+\.)?s3(?:(?:\.[a-z0-9-]+)?|-website[.-][a-z0-9-]+|-(?:[a-z]{2,}-[a-z]+-\d+))?\.amazonaws\.com$/i`) that explicitly excludes ELB domains and arbitrary prefixes like `s3-evil.amazonaws.com`.
   2. Added a `perResourceDns: true/false` flag to `TAKEOVER_SERVICES`: NXDOMAIN target checks are *only* executed for providers that de-register DNS records upon resource teardown (AWS Elastic Beanstalk, Azure Web App, Azure Traffic Manager). Shared anycast platforms rely exclusively on HTTP status and response-body fingerprinting.
   3. Resolver errors other than genuine `ENOTFOUND` (such as `ESERVFAIL` or `ETIMEOUT`) are ignored.
 
 ### Issue E: Inbound DNS Rebinding & Cross-Origin Scanner Hijacking
 - **What Was Broken**: The local server bound to `0.0.0.0` with wildcard CORS headers, allowing external websites visited by the researcher to issue unauthorized scan requests against internal infrastructure.
+- **Root Cause**: Trusting ambient local network requests without validating origins, host headers, or request intent.
 - **The Fix**:
   1. Defaulted listener to `127.0.0.1` (configurable via `HOST`).
   2. Enforced strict exact-origin matching (`ALLOWED_ORIGINS`), eliminating arbitrary cloud subdomains and removing `credentials: true`.
@@ -70,28 +71,29 @@ During our iterative hardening process, we uncovered and systematically eliminat
 
 ---
 
-## 4. Precision & Recall Benchmark vs. Subfinder
+## 4. Evaluation Methodology: Establishing Ground Truth
 
-We benchmarked ReconForge against **ProjectDiscovery's Subfinder v2.6** on the authorized target `owasp.org` under identical network conditions (Node 20, 1Gbps fiber, public DNS resolvers `1.1.1.1` and `8.8.8.8`).
+In offensive tooling and asset discovery, measuring true precision and recall requires establishing an authoritative **ground truth**.
 
-### Benchmark Results
+### Why Third-Party Public Domains Do Not Provide Ground Truth
+Comparing tool outputs on arbitrary third-party domains (such as bug bounty scopes or public sites) only measures **source overlap**, not true recall:
+- **Unknown Total Population**: Without authoritative zone records, the total set of existing subdomains is unknown ($TP + FN$).
+- **Unresolvable Records**: Passive sources frequently index historical DNS records or expired certificates that no longer resolve. Labeling an unresolvable passive record as either a "true positive" or a "false positive" without authoritative zone context is methodologically invalid.
+- **Authorization Boundaries**: While passive intelligence gathering (Stages 1–3) queries public logs, active service probing (Stage 5) transmits direct HTTP/HTTPS requests to discovered endpoints. Active probing must only be performed against assets you own or have explicit, written authorization to test.
 
-| Metric | Subfinder v2 (Default Passive) | ReconForge v2.1 Native Engine | Variance |
-| :--- | :--- | :--- | :--- |
-| **Total Subdomains Discovered** | 132 | 129 | -3 (-2.2%) |
-| **Valid Resolvable FQDNs** | 98 | 98 | 0 (100% Parity) |
-| **True Positives (Verified Active)** | 98 | 98 | **100% Recall** |
-| **False Positives (Wildcard/Garbage)** | 4 (DNS wildcard echoes) | 0 (Filtered via canary checks) | **+100% Precision** |
-| **Passive Discovery Latency** | 4.8 seconds | 5.2 seconds | +0.4s |
-| **External Dependencies Required** | Go runtime + 3 binaries | **Zero (Native Node.js runtime)** | N/A |
-| **Integrated Active Probing** | None (requires `httpx`) | **Built-in HTTP/TLS + CNAME analyzer** | Built-in |
-| **SSRF / Rebinding Protection** | None (caller responsibility) | **Fail-Closed Connect-Time Firewall** | Built-in |
+### Recommended Ground Truth Testing Protocol
+To rigorously evaluate discovery precision and recall, security teams should execute benchmarks against an owned, authoritative DNS zone:
 
-### Analysis
-
-1. **Recall**: ReconForge achieved **100% recall** on all verifiable, live `owasp.org` subdomains discovered by Subfinder. The 3 subdomains missed by ReconForge were historical dead records found exclusively in archived Wayback snapshots that no longer possess public DNS records or certificates.
-2. **Precision**: ReconForge demonstrated higher precision by filtering out unresolvable wildcard noise and applying strict RFC 1035 / Punycode validation before queueing targets for HTTP probing.
-3. **Execution Efficiency**: ReconForge completed full dual-source passive enumeration (Certificate Transparency + AlienVault OTX + HackerTarget) in 5.2 seconds without requiring external API keys or pre-compiled binaries.
+1. **Controlled Zone Setup**: Configure an authoritative DNS zone (e.g., `test-zone.net`) with known, pre-determined asset categories:
+   - 20 static `A` / `AAAA` production records.
+   - 5 wildcard-matching test subdomains under `*.wildcard.test-zone.net`.
+   - 3 intentional dangling CNAME records pointing to NXDOMAIN targets across both per-resource providers (e.g. AWS Elastic Beanstalk) and anycast providers.
+   - At least 2 certificates pre-logged to Certificate Transparency (e.g. via Let's Encrypt staging/production).
+2. **Measurement Criteria**:
+   - **Precision**: $\frac{\text{True Active Subdomains Discovered}}{\text{Total Subdomains Reported by Engine}}$
+   - **Recall**: $\frac{\text{Configured Zone Assets Discovered}}{\text{Total Known Configured Zone Assets}}$
+   - **Wildcard Resilience**: Number of bogus/non-existent wildcard labels incorrectly elevated to verified active assets.
+3. **Reproducibility**: Run automated test runs across multiple independent DNS resolvers (`1.1.1.1`, `8.8.8.8`, local recursive), capturing full raw JSON output files and network trace logs.
 
 ---
 
@@ -103,28 +105,26 @@ The codebase includes an automated unit test suite executed via Node's native te
 npm test
 ```
 
-### Verified Test Assertions (13/13 Passing)
+### Verified Test Invariants (13/13 Passing)
 
 ```text
-✔ sanitizeDomain - normalizes raw user inputs (1.25ms)
-✔ isValidDomain - strictly validates FQDNs and Punycode IDNs (0.38ms)
-✔ Invariant: isValidDomain rejects IP literals so Node never skips lookup hook (0.14ms)
-✔ isPrivateOrReservedIp - fails closed on invalid input and blocks all SSRF vectors (7.43ms)
-✔ classifyIpRisk - accurately classifies internal IP ranges with tiered severities (0.51ms)
-✔ isTokenValid - performs constant-time cryptographic token verification (0.24ms)
-✔ storeScan and getScan - implements true LRU cache and preserves running scans (0.44ms)
-✔ isValidHostHeader - protects against inbound DNS rebinding (0.19ms)
-✔ isAllowedOrigin - exact matching blocks arbitrary subdomains and attacker origins (0.53ms)
-✔ detectWildcardDNS - tests both IPv4 and IPv6 canary addresses (2.35ms)
-✔ checkTakeoverRisk - verified per-resource cloud services, regional S3 regex, and NXDOMAIN logic (1.83ms)
-✔ Live Express API tests: Host header rebinding protection, read routes, session tokens & 429 throttle (63.83ms)
-✔ Live SSRF defense: verifies connection-time hook blocks loopback and local server receives 0 hits (1.42ms)
-
-Total Tests: 13 Passed, 0 Failed, 0 Skipped (13.2s)
+✔ sanitizeDomain - normalizes raw user inputs
+✔ isValidDomain - strictly validates FQDNs and Punycode IDNs
+✔ Invariant: isValidDomain rejects IP literals so Node never skips lookup hook
+✔ isPrivateOrReservedIp - fails closed on invalid input and blocks all SSRF vectors
+✔ classifyIpRisk - accurately classifies internal IP ranges with tiered severities
+✔ isTokenValid - performs constant-time cryptographic token verification
+✔ storeScan and getScan - implements true LRU cache and preserves running scans
+✔ isValidHostHeader - protects against inbound DNS rebinding
+✔ isAllowedOrigin - exact matching blocks arbitrary subdomains and attacker origins
+✔ detectWildcardDNS - tests both IPv4 and IPv6 canary addresses
+✔ checkTakeoverRisk - verified per-resource cloud services, regional S3 regex, and NXDOMAIN logic
+✔ Live Express API tests: Host header rebinding protection, read routes, session tokens & 429 throttle
+✔ Live SSRF defense: verifies connection-time hook blocks loopback and local server receives 0 hits
 ```
 
 ### Continuous Integration (CI)
-A multi-version GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every commit and pull request across **Node.js 18, 20, and 22**, validating:
+A multi-version GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every commit and pull request across active LTS Node.js versions (**Node.js 22.x and 24.x**), validating:
 1. Exact dependency resolution via `npm ci` from the committed `package-lock.json`.
 2. Clean execution of the full unit test suite via `npm test`.
 3. Complete production asset compilation via `npm run build`.
@@ -133,4 +133,4 @@ A multi-version GitHub Actions workflow (`.github/workflows/ci.yml`) runs on eve
 
 ## 6. Summary
 
-ReconForge v2.1 successfully demonstrates that high-performance, accurate security reconnaissance does not require complex binary chains. By implementing native OSINT harvesting, dual-stack canary wildcard detection, connect-time SSRF defenses, and verified per-resource takeover heuristics, ReconForge delivers production-grade results with verifiable data integrity.
+ReconForge v2.1 eliminates the need for managing external Go or Python binary dependencies for routine reconnaissance workflows. By implementing native OSINT harvesting, dual-stack canary wildcard detection, connect-time SSRF socket defenses, and verified per-resource takeover heuristics, ReconForge provides a secure and verifiable asset discovery pipeline.

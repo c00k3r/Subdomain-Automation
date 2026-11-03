@@ -180,6 +180,14 @@ test('classifyIpRisk - accurately classifies internal IP ranges with tiered seve
 
   const nat64Loopback = classifyIpRisk('64:ff9b::7f00:1');
   assert.equal(nat64Loopback.severity, 'INFO', 'NAT64 loopback must unwrap to 127.0.0.1 and classify as INFO');
+
+  // Public internet addresses and invalid/unparseable inputs must return null (no internal risk)
+  assert.equal(classifyIpRisk('8.8.8.8'), null, 'Public IP 8.8.8.8 must return null');
+  assert.equal(classifyIpRisk('1.1.1.1'), null, 'Public IP 1.1.1.1 must return null');
+  assert.equal(classifyIpRisk('garbage'), null, 'Unparseable input must return null');
+  assert.equal(classifyIpRisk(''), null, 'Empty string must return null');
+  assert.equal(classifyIpRisk(null), null, 'null input must return null');
+  assert.equal(classifyIpRisk(undefined), null, 'undefined input must return null');
 });
 
 test('isTokenValid - performs constant-time cryptographic token verification', () => {
@@ -338,6 +346,27 @@ test('checkTakeoverRisk - verified per-resource cloud services, regional S3 rege
   );
   assert.ok(s3WebsiteRes);
   assert.equal(s3WebsiteRes.service, 'Amazon S3');
+
+  // Tightened S3 regex: s3-evil.amazonaws.com must NOT match S3 CNAME regex (does not report Likely/CRITICAL S3 takeover)
+  const s3EvilResolver = async () => ['s3-evil.amazonaws.com'];
+  const s3EvilRes = await checkTakeoverRisk(
+    'test.target.com',
+    404,
+    'NoSuchBucket',
+    s3EvilResolver,
+    nxDomainTargetResolver
+  );
+  assert.notEqual(s3EvilRes?.service, 'Amazon S3', 's3-evil.amazonaws.com must NOT match Amazon S3 CNAME pattern');
+  assert.notEqual(s3EvilRes?.certainty, 'Likely', 's3-evil.amazonaws.com must NOT be reported as Likely S3 takeover');
+
+  const s3EvilEmptyRes = await checkTakeoverRisk(
+    'test.target.com',
+    0,
+    '',
+    s3EvilResolver,
+    nxDomainTargetResolver
+  );
+  assert.equal(s3EvilEmptyRes, null, 's3-evil without body match must return null');
 
   // 5. Shared anycast services (S3 / GitHub Pages) do NOT trigger takeover on NXDOMAIN without HTTP fingerprint
   const s3EmptyBodyRes = await checkTakeoverRisk(

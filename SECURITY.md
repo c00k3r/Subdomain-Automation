@@ -78,6 +78,7 @@ Like all L7 and DNS-based security assessment tools, ReconForge operates within 
 2. **Upstream Resolver Trust**: DNS resolution relies on system-configured recursive resolvers (`/etc/resolv.conf`). Poisoned or tampering upstream recursive resolvers are outside the application's verification perimeter.
 3. **Out-of-Band Cloud Takeovers**: Certain modern cloud platforms require out-of-band verification tokens (e.g. TXT verification records) to claim dangling resources. A dangling CNAME indicates high risk, but takeover feasibility depends on provider-specific claim policies.
 4. **Third-Party OSINT Rate Limits**: Passive intelligence gathering depends on public external APIs (`crt.sh`, AlienVault OTX, HackerTarget) which may enforce temporary rate limits or latency spikes.
+5. **Unauthenticated Read Endpoints**: Read-only endpoints (`/api/recon/history`, `/api/recon/scan/:id`, `/api/recon/stream/:id`) are unauthenticated and do not enforce the session token (the session token is enforced on mutating scan actions via `POST /api/recon/start`). Read endpoints rely on inbound `Host` header validation and CORS origin restrictions to prevent browser-based cross-origin exfiltration. If the server is bound to a non-loopback address (`HOST=0.0.0.0`), unauthenticated read requests originating from the same local area network are permitted by design.
 
 ---
 

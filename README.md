@@ -1,5 +1,9 @@
 # ReconForge -- Subdomain Reconnaissance & Active Service Probing (v2.1)
 
+[![CI Test & Build](https://github.com/reconforge/reconforge/actions/workflows/ci.yml/badge.svg)](https://github.com/reconforge/reconforge/actions/workflows/ci.yml)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
+[![Dependabot](https://img.shields.io/badge/dependabot-enabled-blue.svg)](.github/dependabot.yml)
+
 An automated attack surface mapping and service probing suite for security researchers, bug bounty hunters, and penetration testers.
 
 ReconForge features a **dual-engine architecture**:
@@ -33,7 +37,7 @@ Unlike basic scanners that blindly curl resolved addresses, ReconForge actively 
 - **Wildcard DNS Handling**: Bypasses dictionary guessing under wildcard zones while preserving all verified passive records from Certificate Transparency and passive DNS.
 - **Subdomain Takeover Verification**: Queries DNS `CNAME` records via `dns.resolveCname`, checks for NXDOMAIN on CNAME targets, strictly evaluates suffixes via `endsWith()`, and classifies findings into calibrated "Likely" and "Potential" certainty tiers.
 
-For in-depth threat modeling and limitations, see [SECURITY.md](SECURITY.md). For deep technical rationale, see [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md). For precision/recall benchmarks and the engineering postmortem, see [docs/BENCHMARK_AND_WRITEUP.md](docs/BENCHMARK_AND_WRITEUP.md).
+For in-depth threat modeling and limitations, see [SECURITY.md](SECURITY.md). For deep technical rationale, see [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md). For engineering architecture and technical postmortem, see [docs/BENCHMARK_AND_WRITEUP.md](docs/BENCHMARK_AND_WRITEUP.md).
 
 ---
 
@@ -44,7 +48,7 @@ ReconForge/
 ├── server.js               # Native Node.js engine, SSRF firewall, API routes & SSE streaming
 ├── docs/
 │   ├── DESIGN_NOTES.md     # Security design notes & architecture rationale
-│   └── BENCHMARK_AND_WRITEUP.md # Subfinder benchmark & engineering writeup
+│   └── BENCHMARK_AND_WRITEUP.md # Engineering architecture & postmortem writeup
 ├── test/
 │   └── sanity.test.js      # Unit tests for domain sanitizer, Punycode, SSRF filter, wildcard DNS, CNAME
 ├── src/
@@ -82,7 +86,7 @@ ReconForge runs locally on your PC without publishing anything to the web.
 
 ### Prerequisites
 
-- **Node.js** (v18 or higher): [nodejs.org](https://nodejs.org/)
+- **Node.js** (v22 or higher): [nodejs.org](https://nodejs.org/)
 
 ---
 

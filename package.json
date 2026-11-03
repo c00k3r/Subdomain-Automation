@@ -3,6 +3,9 @@
   "version": "2.1.0",
   "description": "Subdomain Reconnaissance & Active Service Probing Automation Engine",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "node server.js",
     "build": "vite build",
