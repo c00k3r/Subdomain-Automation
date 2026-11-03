@@ -26,13 +26,25 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'topology' }) => {
   const [copiedUrl, setCopiedUrl] = useState(null);
   const [search, setSearch] = useState('');
   const [copiedAll, setCopiedAll] = useState(false);
+  const [hostCategoryFilter, setHostCategoryFilter] = useState('all'); // 'all' | 'http' | 'dns' | 'blocked'
 
   if (!scan) return null;
 
   const aliveHosts = scan.aliveHosts || [];
   const allSubdomains = scan.subdomains || [];
+  const httpHosts = scan.httpHosts || aliveHosts.filter((h) => h.hostType === 'http' || (h.statusCode > 0 && !h.ssrfBlocked));
+  const dnsHosts = scan.dnsHosts || aliveHosts.filter((h) => h.hostType === 'dns' || (h.statusCode === 0 && !h.ssrfBlocked));
+  const blockedHosts = scan.blockedHosts || aliveHosts.filter((h) => h.hostType === 'blocked' || h.ssrfBlocked);
+
+  const httpCount = scan.httpCount !== undefined ? scan.httpCount : httpHosts.length;
+  const dnsCount = scan.dnsCount !== undefined ? scan.dnsCount : dnsHosts.length;
+  const blockedCount = scan.blockedCount !== undefined ? scan.blockedCount : blockedHosts.length;
 
   const filteredAlive = aliveHosts.filter((h) => {
+    if (hostCategoryFilter === 'http' && (h.hostType !== 'http' && !(h.statusCode > 0 && !h.ssrfBlocked))) return false;
+    if (hostCategoryFilter === 'dns' && (h.hostType !== 'dns' && !(h.statusCode === 0 && !h.ssrfBlocked))) return false;
+    if (hostCategoryFilter === 'blocked' && (h.hostType !== 'blocked' && !h.ssrfBlocked)) return false;
+
     if (!search) return true;
     const q = search.toLowerCase();
     const matchUrl = h.url.toLowerCase().includes(q);
@@ -74,14 +86,29 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'topology' }) => {
             <span className="text-indigo-400 font-mono">{scan.domain}</span>
           </h2>
 
-          <div className="flex items-center space-x-3 text-xs text-slate-400 pt-1">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-xs text-slate-400 pt-1">
             <span>
               <strong className="text-white font-mono">{allSubdomains.length}</strong> subdomains
             </span>
             <span>·</span>
-            <span>
-              <strong className="text-emerald-400 font-mono">{aliveHosts.length}</strong> live hosts
+            <span className="inline-flex items-center space-x-1">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block"></span>
+              <span><strong className="text-emerald-400 font-mono">{httpCount}</strong> HTTP live</span>
             </span>
+            <span>·</span>
+            <span className="inline-flex items-center space-x-1">
+              <span className="w-2 h-2 rounded-full bg-sky-400 inline-block"></span>
+              <span><strong className="text-sky-400 font-mono">{dnsCount}</strong> DNS only</span>
+            </span>
+            {blockedCount > 0 && (
+              <>
+                <span>·</span>
+                <span className="inline-flex items-center space-x-1">
+                  <span className="w-2 h-2 rounded-full bg-rose-400 inline-block"></span>
+                  <span><strong className="text-rose-400 font-mono">{blockedCount}</strong> blocked internal</span>
+                </span>
+              </>
+            )}
             <span>·</span>
             <span className="flex items-center space-x-1">
               <Clock className="w-3.5 h-3.5" />
@@ -125,7 +152,7 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'topology' }) => {
         </button>
 
         <button
-          onClick={() => { setActiveTab('alive'); setSearch(''); }}
+          onClick={() => { setActiveTab('alive'); setSearch(''); setHostCategoryFilter('all'); }}
           className={`pb-3 px-3 sm:px-4 flex items-center space-x-2 border-b-2 whitespace-nowrap transition-colors ${
             activeTab === 'alive'
               ? 'border-indigo-500 text-white font-semibold'
@@ -133,7 +160,7 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'topology' }) => {
           }`}
         >
           <Activity className="w-4 h-4 text-emerald-400" />
-          <span>Live Websites ({aliveHosts.length})</span>
+          <span>Live Websites ({httpCount})</span>
         </button>
 
         <button
@@ -211,8 +238,54 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'topology' }) => {
               download
             >
               <Download className="w-3.5 h-3.5" />
-              <span>Export alive.txt</span>
+              <span>Export alive.txt ({httpCount})</span>
             </a>
+          </div>
+
+          {/* Sub-category Filter Chips */}
+          <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono">
+            <button
+              onClick={() => setHostCategoryFilter('all')}
+              className={`px-2.5 py-1 rounded-lg border transition-colors ${
+                hostCategoryFilter === 'all'
+                  ? 'bg-slate-700 text-white border-slate-500 font-semibold'
+                  : 'bg-[#161822] text-slate-400 border-[#262b3b] hover:text-slate-200'
+              }`}
+            >
+              All Resolved ({aliveHosts.length})
+            </button>
+            <button
+              onClick={() => setHostCategoryFilter('http')}
+              className={`px-2.5 py-1 rounded-lg border transition-colors ${
+                hostCategoryFilter === 'http'
+                  ? 'bg-emerald-600 text-white border-emerald-500 font-semibold'
+                  : 'bg-[#161822] text-emerald-400/80 border-[#262b3b] hover:text-emerald-300'
+              }`}
+            >
+              HTTP Live ({httpCount})
+            </button>
+            <button
+              onClick={() => setHostCategoryFilter('dns')}
+              className={`px-2.5 py-1 rounded-lg border transition-colors ${
+                hostCategoryFilter === 'dns'
+                  ? 'bg-sky-600 text-white border-sky-500 font-semibold'
+                  : 'bg-[#161822] text-sky-400/80 border-[#262b3b] hover:text-sky-300'
+              }`}
+            >
+              DNS Only ({dnsCount})
+            </button>
+            {blockedCount > 0 && (
+              <button
+                onClick={() => setHostCategoryFilter('blocked')}
+                className={`px-2.5 py-1 rounded-lg border transition-colors ${
+                  hostCategoryFilter === 'blocked'
+                    ? 'bg-rose-600 text-white border-rose-500 font-semibold'
+                    : 'bg-[#161822] text-rose-400/80 border-[#262b3b] hover:text-rose-300'
+                }`}
+              >
+                Blocked Internal ({blockedCount})
+              </button>
+            )}
           </div>
 
           {filteredAlive.length === 0 ? (
@@ -229,9 +302,19 @@ export const ResultsView = ({ scan, onNewScan, defaultTab = 'topology' }) => {
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center space-x-1.5">
-                        <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                          {host.statusCode ? `${host.statusCode} OK` : 'DNS Active'}
-                        </span>
+                        {host.hostType === 'blocked' || host.ssrfBlocked ? (
+                          <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/30">
+                            SSRF Blocked
+                          </span>
+                        ) : host.hostType === 'http' || host.statusCode > 0 ? (
+                          <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                            {host.statusCode} OK
+                          </span>
+                        ) : (
+                          <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/20">
+                            DNS Only
+                          </span>
+                        )}
                         {host.takeoverRisk && host.takeoverRisk.isVulnerable && (
                           <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
                             Takeover Risk

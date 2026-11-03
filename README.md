@@ -7,23 +7,23 @@
 An automated attack surface mapping and service probing suite for security researchers, bug bounty hunters, and penetration testers.
 
 <p align="center">
-  <img src="docs/screenshots/reconforge-hero.png" alt="ReconForge Desktop Interface v2.1" width="880" />
+  <img src="docs/screenshots/reconforge-hero.png" alt="ReconForge Local Web App Interface v2.1" width="880" />
 </p>
 
 ReconForge features a **dual-engine architecture**:
-1. **Native Node.js Engine & Desktop GUI**: A standalone, zero-Go-dependency engine featuring an interactive React (JSX) dashboard, HTML5 Canvas topology graph, real-time ANSI terminal streaming via Server-Sent Events (SSE), fail-closed SSRF defenses (`net.BlockList` + connect-time lookup), inbound DNS rebinding protection (Host header validation), and takeover risk detection with CNAME NXDOMAIN verification.
+1. **Native Node.js Engine & Local Web App**: A standalone, zero-Go-dependency engine featuring an interactive React (JSX) dashboard, HTML5 Canvas topology graph, real-time ANSI terminal streaming via Server-Sent Events (SSE), fail-closed SSRF defenses (`net.BlockList` + connect-time lookup), inbound DNS rebinding protection (Host header validation), and takeover risk detection with CNAME NXDOMAIN verification.
 2. **Classic Bash CLI Pipeline**: The standalone script suite (`recon.sh`, `functions.sh`, `config.sh`) for headless terminal environments orchestrating standard Linux tools (`subfinder`, `assetfinder`, `httpx`).
 
 ---
 
 ## Screenshots & Interface Tour
 
-ReconForge pairs an automated reconnaissance engine with a high-fidelity desktop workspace for security researchers:
+ReconForge pairs an automated reconnaissance engine with a high-fidelity local web application for security researchers:
 
 | Interface View | Screenshot | Capabilities |
 | :--- | :--- | :--- |
-| **01. Scope & Launch** | [![Scope & Launch](docs/screenshots/reconforge-hero.png)](docs/screenshots/reconforge-hero.png) | Single-click authorized target presets, RFC 1035 & Punycode IDN syntax normalization, and instant passive discovery launch. |
-| **02. Multi-Stage Pipeline** | [![Multi-Stage Pipeline](docs/screenshots/scan-progress.png)](docs/screenshots/scan-progress.png) | Real-time 5-stage progress indicator with ETA, dynamic stage checklists, and live Server-Sent Events (SSE) terminal streaming. |
+| **01. Scope & Launch** | [![Scope & Launch](docs/screenshots/reconforge-hero.png)](docs/screenshots/reconforge-hero.png) | Single-click example public target presets, permission checkbox gate for active probing, RFC 1035 & Punycode IDN syntax normalization, and instant passive discovery launch. |
+| **02. Multi-Stage Pipeline** | [![Multi-Stage Pipeline](docs/screenshots/scan-progress.png)](docs/screenshots/scan-progress.png) | Real-time 6-stage progress indicator with ETA, dynamic stage checklists, and live Server-Sent Events (SSE) terminal streaming. |
 | **03. Attack Surface Topology** | [![Attack Surface Topology](docs/screenshots/topology-graph.png)](docs/screenshots/topology-graph.png) | Interactive HTML5 Canvas constellation map clustering discovered assets into functional tiers (Apex Hub, Web Apps, APIs, Cloud/CDN, Auth & Portals, Internal/Dev) with zoom, pan, and filter controls. |
 | **04. Live Host Probing** | [![Live Host Probing](docs/screenshots/live-websites.png)](docs/screenshots/live-websites.png) | Live web server grid featuring HTTP/HTTPS status codes, response latencies, HTML `<title>` tags, dual-stack IP addresses, and technology fingerprints. |
 | **05. Subdomain Inventory** | [![Subdomain Inventory](docs/screenshots/subdomains-inventory.png)](docs/screenshots/subdomains-inventory.png) | Complete deduplicated FQDN inventory with instant text search, prefix badges, and one-click export to clipboard, `subdomains.txt`, `alive.txt`, or Markdown. |
@@ -31,7 +31,7 @@ ReconForge pairs an automated reconnaissance engine with a high-fidelity desktop
 ### Visual Walkthrough
 
 #### 1. Scope & Target Entry
-Enter any target apex domain or select an authorized scope preset (e.g. HackerOne, Mozilla, OWASP, GitHub). The system normalizes inputs, strips accidental protocol wrappers, and checks system resolver responsiveness before starting.
+Enter any target apex domain or select an example public target preset (e.g. HackerOne, Mozilla, OWASP, GitHub). The system normalizes inputs, strips accidental protocol wrappers, and checks system resolver responsiveness before starting. Active probing (Stage 5) is gated behind an explicit permission confirmation checkbox.
 
 <p align="center">
   <img src="docs/screenshots/reconforge-hero.png" alt="Target Scope and Discovery Launch" width="850" />
@@ -90,7 +90,7 @@ Unlike basic scanners that blindly curl resolved addresses, ReconForge actively 
 - **Wildcard DNS Handling**: Bypasses dictionary guessing under wildcard zones while preserving all verified passive records from Certificate Transparency and passive DNS.
 - **Subdomain Takeover Verification**: Queries DNS `CNAME` records via `dns.resolveCname`, checks for NXDOMAIN on CNAME targets, strictly evaluates suffixes via `endsWith()`, and classifies findings into calibrated "Likely" and "Potential" certainty tiers.
 
-For in-depth threat modeling and limitations, see [SECURITY.md](SECURITY.md). For deep technical rationale, see [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md). For engineering architecture and technical postmortem, see [docs/BENCHMARK_AND_WRITEUP.md](docs/BENCHMARK_AND_WRITEUP.md).
+For in-depth threat modeling and limitations, see [SECURITY.md](SECURITY.md). For deep technical rationale, see [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md). For engineering architecture and technical postmortem, see [docs/ENGINEERING_POSTMORTEM.md](docs/ENGINEERING_POSTMORTEM.md).
 
 ---
 
@@ -101,7 +101,7 @@ ReconForge/
 ├── server.js               # Native Node.js engine, SSRF firewall, API routes & SSE streaming
 ├── docs/
 │   ├── DESIGN_NOTES.md     # Security design notes & architecture rationale
-│   └── BENCHMARK_AND_WRITEUP.md # Engineering architecture & postmortem writeup
+│   └── ENGINEERING_POSTMORTEM.md # Engineering architecture & postmortem writeup
 ├── test/
 │   └── sanity.test.js      # Unit tests for domain sanitizer, Punycode, SSRF filter, wildcard DNS, CNAME
 ├── src/
@@ -209,4 +209,8 @@ This verifies:
 
 ## Disclaimer & Authorized Use
 
-This tool is designed for security assessments against targets you own or are explicitly authorized to test under written permission or public bug bounty program rules. Always adhere to responsible testing practices.
+ReconForge separates passive discovery from active probing:
+- **Stages 1–4 (Passive Discovery & OSINT)**: Exclusively query publicly aggregated logs (Certificate Transparency logs, AlienVault OTX, HackerTarget) and perform recursive DNS lookups without sending direct HTTP/TCP requests to the target domain infrastructure ("zero target packet exposure").
+- **Stage 5 (Active HTTP Probing)**: Actively initiates HTTP/HTTPS GET/HEAD requests to discovered hosts for title extraction, header fingerprinting, and status classification. This stage is gated behind an explicit permission confirmation checkbox in the UI and must only be performed on domains you own or have explicit written authorization to probe.
+
+Never engage in unauthorized active testing against systems without prior consent. Always adhere to responsible testing practices and bug bounty program policies.

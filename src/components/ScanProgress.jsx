@@ -79,18 +79,25 @@ export const ScanProgress = ({ scan, onComplete }) => {
         </div>
 
         {/* Live Counters */}
-        <div className="grid grid-cols-2 gap-4 pt-2 border-t border-[#222736]">
-          <div className="p-4 rounded-xl bg-[#0e1017] border border-[#202533] text-center">
-            <span className="text-xs text-slate-400 font-medium">Subdomains Found</span>
-            <div className="text-2xl font-bold text-white font-mono mt-1">
+        <div className="grid grid-cols-3 gap-2 sm:gap-4 pt-2 border-t border-[#222736]">
+          <div className="p-3 sm:p-4 rounded-xl bg-[#0e1017] border border-[#202533] text-center">
+            <span className="text-[11px] sm:text-xs text-slate-400 font-medium">Subdomains</span>
+            <div className="text-xl sm:text-2xl font-bold text-white font-mono mt-1">
               {scan.totalSubdomains || scan.subdomains?.length || 0}
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-[#0e1017] border border-[#202533] text-center">
-            <span className="text-xs text-slate-400 font-medium">Live Websites</span>
-            <div className="text-2xl font-bold text-emerald-400 font-mono mt-1">
-              {scan.aliveCount || scan.aliveHosts?.length || 0}
+          <div className="p-3 sm:p-4 rounded-xl bg-[#0e1017] border border-[#202533] text-center">
+            <span className="text-[11px] sm:text-xs text-emerald-400/90 font-medium">HTTP Live</span>
+            <div className="text-xl sm:text-2xl font-bold text-emerald-400 font-mono mt-1">
+              {scan.httpCount !== undefined ? scan.httpCount : (scan.aliveCount || 0)}
+            </div>
+          </div>
+
+          <div className="p-3 sm:p-4 rounded-xl bg-[#0e1017] border border-[#202533] text-center">
+            <span className="text-[11px] sm:text-xs text-sky-400/90 font-medium">DNS Only</span>
+            <div className="text-xl sm:text-2xl font-bold text-sky-400 font-mono mt-1">
+              {scan.dnsCount !== undefined ? scan.dnsCount : 0}
             </div>
           </div>
         </div>

@@ -31,7 +31,14 @@ export const LiveHostsTable = ({ aliveHosts = [], scanId = '' }) => {
     setTimeout(() => setCopiedUrl(null), 1800);
   };
 
-  const getStatusBadge = (code) => {
+  const getStatusBadge = (code, host) => {
+    if (host?.hostType === 'blocked' || host?.ssrfBlocked) {
+      return (
+        <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-950/80 text-rose-400 border border-rose-800/50">
+          SSRF BLOCKED
+        </span>
+      );
+    }
     if (code >= 200 && code < 300) {
       return (
         <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-950/80 text-emerald-400 border border-emerald-800/50">
@@ -61,7 +68,7 @@ export const LiveHostsTable = ({ aliveHosts = [], scanId = '' }) => {
       );
     }
     return (
-      <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-800">
+      <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-900 text-sky-400 border border-sky-800/40">
         DNS ONLY
       </span>
     );
@@ -131,7 +138,7 @@ export const LiveHostsTable = ({ aliveHosts = [], scanId = '' }) => {
             >
               <div className="space-y-1 min-w-0 flex-1">
                 <div className="flex items-center space-x-2.5 flex-wrap">
-                  {getStatusBadge(host.statusCode)}
+                  {getStatusBadge(host.statusCode, host)}
 
                   <a
                     href={host.url}

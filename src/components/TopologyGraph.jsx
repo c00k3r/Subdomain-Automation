@@ -61,7 +61,16 @@ export const TopologyGraph = ({ scan }) => {
     subdomains.forEach((sub, idx) => {
       if (sub === domain) return;
       const aliveInfo = aliveMap.get(sub.toLowerCase());
+      const isHttpLive = aliveInfo ? (aliveInfo.hostType === 'http' || (aliveInfo.statusCode > 0 && !aliveInfo.ssrfBlocked)) : false;
+      const isDnsOnly = aliveInfo ? (aliveInfo.hostType === 'dns' || (aliveInfo.statusCode === 0 && !aliveInfo.ssrfBlocked)) : false;
+      const isBlocked = aliveInfo ? (aliveInfo.hostType === 'blocked' || aliveInfo.ssrfBlocked) : false;
       const isAlive = !!aliveInfo;
+
+      let nodeColor = '#475569'; // offline
+      if (isHttpLive) nodeColor = '#10b981'; // emerald green
+      else if (isDnsOnly) nodeColor = '#38bdf8'; // sky blue
+      else if (isBlocked) nodeColor = '#f43f5e'; // rose red
+
       const category = aliveInfo?.category || (
         sub.includes('api') ? 'api' :
         sub.includes('auth') || sub.includes('vpn') || sub.includes('login') ? 'auth' :
@@ -89,11 +98,14 @@ export const TopologyGraph = ({ scan }) => {
         clusterId: targetCluster,
         category,
         isAlive,
+        isHttpLive,
+        isDnsOnly,
+        isBlocked,
         aliveInfo,
         x: Math.cos(spreadAngle) * nodeDist,
         y: Math.sin(spreadAngle) * nodeDist,
-        radius: isAlive ? 7 : 5,
-        color: isAlive ? '#10b981' : '#475569',
+        radius: isHttpLive ? 7 : isAlive ? 6 : 5,
+        color: nodeColor,
       });
     });
 
@@ -156,7 +168,7 @@ export const TopologyGraph = ({ scan }) => {
       // Draw Nodes
       nodes.forEach((node) => {
         if (node.type === 'host') {
-          if (filterMode === 'live' && !node.isAlive) return;
+          if (filterMode === 'live' && !node.isHttpLive) return;
           if (filterMode === 'hvt' && node.category === 'general') return;
         }
 
@@ -168,10 +180,15 @@ export const TopologyGraph = ({ scan }) => {
           ctx.arc(node.x, node.y, node.radius + 8 + Math.sin(anglePulse) * 3, 0, Math.PI * 2);
           ctx.fillStyle = 'rgba(99, 102, 241, 0.15)';
           ctx.fill();
-        } else if (node.isAlive) {
+        } else if (node.isHttpLive) {
           ctx.beginPath();
           ctx.arc(node.x, node.y, node.radius + 4 + Math.sin(anglePulse + node.x) * 2, 0, Math.PI * 2);
           ctx.fillStyle = 'rgba(16, 185, 129, 0.2)';
+          ctx.fill();
+        } else if (node.isBlocked) {
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, node.radius + 3, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(244, 63, 94, 0.25)';
           ctx.fill();
         }
 
@@ -278,7 +295,7 @@ export const TopologyGraph = ({ scan }) => {
                 filterMode === 'live' ? 'bg-emerald-600 text-white font-semibold' : 'text-slate-400 hover:text-white'
               }`}
             >
-              Live Only
+              HTTP Live
             </button>
             <button
               onClick={() => setFilterMode('hvt')}
@@ -334,7 +351,15 @@ export const TopologyGraph = ({ scan }) => {
           </div>
           <div className="flex items-center space-x-2">
             <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block shadow-[0_0_6px_#10b981]" />
-            <span className="text-slate-300">Live Responding Host</span>
+            <span className="text-slate-300">HTTP Responding Host</span>
+          </div>
+          <div className="flex items-center space-x-2">
+            <span className="w-2 h-2 rounded-full bg-sky-400 inline-block shadow-[0_0_6px_#38bdf8]" />
+            <span className="text-slate-300">DNS Only (No HTTP)</span>
+          </div>
+          <div className="flex items-center space-x-2">
+            <span className="w-2 h-2 rounded-full bg-rose-500 inline-block shadow-[0_0_6px_#f43f5e]" />
+            <span className="text-slate-300">Blocked Internal IP</span>
           </div>
           <div className="flex items-center space-x-2">
             <span className="w-2 h-2 rounded-full bg-slate-500 inline-block" />

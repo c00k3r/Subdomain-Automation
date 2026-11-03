@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import {
   app,
+  createApp,
   sanitizeDomain,
   isValidDomain,
   isPrivateOrReservedIp,
@@ -347,6 +348,20 @@ test('checkTakeoverRisk - verified per-resource cloud services, regional S3 rege
   assert.ok(s3WebsiteRes);
   assert.equal(s3WebsiteRes.service, 'Amazon S3');
 
+  // 4b. Dualstack S3 endpoints (s3.dualstack.<region>.amazonaws.com) -> Likely Takeover
+  const s3DualstackResolver = async () => ['assets.s3.dualstack.us-west-2.amazonaws.com'];
+  const s3DualstackRes = await checkTakeoverRisk(
+    'media.target.com',
+    404,
+    'The specified bucket does not exist',
+    s3DualstackResolver,
+    nxDomainTargetResolver
+  );
+  assert.ok(s3DualstackRes);
+  assert.equal(s3DualstackRes.service, 'Amazon S3');
+  assert.equal(s3DualstackRes.certainty, 'Likely');
+  assert.equal(s3DualstackRes.severity, 'CRITICAL');
+
   // Tightened S3 regex: s3-evil.amazonaws.com must NOT match S3 CNAME regex (does not report Likely/CRITICAL S3 takeover)
   const s3EvilResolver = async () => ['s3-evil.amazonaws.com'];
   const s3EvilRes = await checkTakeoverRisk(
@@ -433,7 +448,8 @@ test('checkTakeoverRisk - verified per-resource cloud services, regional S3 rege
 });
 
 test('Live Express API tests: Host header rebinding protection, read routes, session tokens & 429 throttle', async () => {
-  const server = http.createServer(app);
+  const testApp = createApp({ runWorkflow: async (scan) => { scan.status = 'completed'; } });
+  const server = http.createServer(testApp);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
 
@@ -557,6 +573,71 @@ test('Live Express API tests: Host header rebinding protection, read routes, ses
     scans.delete('concur_3');
 
     assert.equal(throttledStatus, 429, 'POST /api/recon/start must return 429 when max concurrent scans reached');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('Workflow runner injection: mocked workflow runs to completion and populates split host categories', async () => {
+  let executedScan = null;
+  const mockWorkflow = async (scan) => {
+    executedScan = scan;
+    scan.step = 6;
+    scan.status = 'completed';
+    scan.totalSubdomains = 3;
+    scan.httpCount = 1;
+    scan.dnsCount = 1;
+    scan.blockedCount = 1;
+    scan.aliveCount = 1;
+    scan.aliveHosts = [
+      { subdomain: `app.${scan.domain}`, hostType: 'http', statusCode: 200, url: `https://app.${scan.domain}`, latencyMs: 25 },
+      { subdomain: `ns.${scan.domain}`, hostType: 'dns', statusCode: 0, url: `http://ns.${scan.domain}`, latencyMs: 12 },
+      { subdomain: `corp.${scan.domain}`, hostType: 'blocked', statusCode: 0, ip: '10.0.0.1', ssrfBlocked: true, internalLeak: true },
+    ];
+  };
+
+  const testApp = createApp({ runWorkflow: mockWorkflow });
+  const server = http.createServer(testApp);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  try {
+    const res = await new Promise((resolve) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/api/recon/start',
+          method: 'POST',
+          headers: {
+            Host: `127.0.0.1:${port}`,
+            'Content-Type': 'application/json',
+            'x-reconforge-session': SESSION_TOKEN,
+          },
+        },
+        (r) => {
+          let data = '';
+          r.on('data', (c) => (data += c));
+          r.on('end', () => resolve({ statusCode: r.statusCode, body: JSON.parse(data) }));
+        }
+      );
+      req.write(JSON.stringify({ domain: 'example.org', allowActiveProbing: true }));
+      req.end();
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.ok(res.body.scanId);
+    assert.equal(res.body.domain, 'example.org');
+
+    // Give microtask queue an instant tick
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(executedScan, 'Injected workflow runner must be called');
+    assert.equal(executedScan.allowActiveProbing, true);
+    assert.equal(executedScan.status, 'completed');
+    assert.equal(executedScan.httpCount, 1);
+    assert.equal(executedScan.dnsCount, 1);
+    assert.equal(executedScan.blockedCount, 1);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

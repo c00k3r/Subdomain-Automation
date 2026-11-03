@@ -10,7 +10,6 @@ import https from 'node:https';
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 
-const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 // Default to 127.0.0.1 for local desktop security; allow 0.0.0.0 only when explicitly configured or in containerized runtimes
 const BIND_HOST = process.env.HOST || (process.env.K_SERVICE ? '0.0.0.0' : '127.0.0.1');
@@ -79,30 +78,6 @@ export function isAllowedOrigin(origin) {
   return DEFAULT_ALLOWED_ORIGINS.has(clean);
 }
 
-app.use(cors({
-  origin: (origin, callback) => {
-    if (isAllowedOrigin(origin)) {
-      callback(null, true);
-    } else {
-      callback(null, false);
-    }
-  },
-  credentials: false, // Explicitly false
-}));
-
-app.use(express.json());
-
-// Inbound DNS Rebinding Protection Middleware: Validates Host header on all /api routes
-app.use('/api', (req, res, next) => {
-  const host = req.headers.host;
-  if (!isValidHostHeader(host)) {
-    return res.status(403).json({
-      error: 'Forbidden: Invalid Host header (Inbound DNS Rebinding protection)',
-    });
-  }
-  next();
-});
-
 // Cryptographically random per-session token to defeat Cross-Origin Scanner Hijacking
 export const SESSION_TOKEN = crypto.randomBytes(24).toString('hex');
 
@@ -112,10 +87,6 @@ export function isTokenValid(token) {
   const b = Buffer.from(SESSION_TOKEN);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
-
-app.get('/api/session', (_req, res) => {
-  res.json({ token: SESSION_TOKEN });
-});
 
 // In-memory store for active and past user scans with true LRU eviction (never evicting running scans)
 export const MAX_SCANS = 30;
@@ -713,10 +684,10 @@ const TAKEOVER_SERVICES = [
   },
   {
     service: 'Amazon S3',
-    // Comprehensive regex covering standard, regional, and website endpoints worldwide
+    // Comprehensive regex covering standard, regional, dualstack, and website endpoints worldwide
     // Excludes generic *.amazonaws.com and *.elb.amazonaws.com to eliminate false positives
-    // Tightened region group prevents arbitrary matching such as s3-evil.amazonaws.com
-    cnameRegex: /^(?:[a-z0-9.-]+\.)?s3(?:(?:\.[a-z0-9-]+)?|-website[.-][a-z0-9-]+|-(?:[a-z]{2,}-[a-z]+-\d+))?\.amazonaws\.com$/i,
+    // Supports s3.dualstack.<region> and tightened region groups while preventing s3-evil.amazonaws.com
+    cnameRegex: /^(?:[a-z0-9.-]+\.)?s3(?:\.dualstack)?(?:(?:\.[a-z0-9-]+)+|-website[.-][a-z0-9-]+|-(?:[a-z]{2,}-[a-z]+-\d+))?\.amazonaws\.com$/i,
     cnameSuffixes: ['.s3.amazonaws.com'],
     fingerprints: [
       'the specified bucket does not exist',
@@ -1017,7 +988,7 @@ export function classifyIpRisk(ip) {
 }
 
 // Active Host Prober with Dual IPv4/IPv6, Real DNS Latency, and SSRF Defense
-async function probeLiveHost(subdomain) {
+async function probeLiveHost(subdomain, allowActive = true) {
   let ip4 = null;
   let ip6 = null;
   let dnsTime = 0;
@@ -1048,6 +1019,7 @@ async function probeLiveHost(subdomain) {
     return {
       url: `http://${subdomain}`,
       subdomain,
+      hostType: 'blocked',
       statusCode: 0,
       title: ipRisk.title,
       latencyMs: dnsTime,
@@ -1060,6 +1032,29 @@ async function probeLiveHost(subdomain) {
       internalLeak: true,
       ipRisk,
     };
+  }
+
+  // If active probing is disabled by user permission gate, evaluate DNS and return DNS-only host
+  if (!allowActive) {
+    if (primaryIp) {
+      const takeoverRisk = await checkTakeoverRisk(subdomain, 0, '');
+      return {
+        url: `http://${subdomain}`,
+        subdomain,
+        hostType: 'dns',
+        statusCode: 0,
+        title: '',
+        latencyMs: dnsTime,
+        ip: primaryIp,
+        ipv6: ip6,
+        category,
+        techStack: ['DNS Only (Active Probing Disabled)'],
+        takeoverRisk,
+        ssrfBlocked: false,
+        internalLeak: false,
+      };
+    }
+    return null;
   }
 
   // Probe HTTPS first, then fallback to HTTP
@@ -1089,6 +1084,7 @@ async function probeLiveHost(subdomain) {
       return {
         url: targetUrl,
         subdomain,
+        hostType: 'http',
         statusCode: res.statusCode,
         title, // Honest: empty string if no HTML title found
         latencyMs,
@@ -1098,6 +1094,8 @@ async function probeLiveHost(subdomain) {
         category,
         techStack: techStack.length > 0 ? techStack : (res.headers['server'] ? [res.headers['server']] : ['Web Server']),
         takeoverRisk,
+        ssrfBlocked: false,
+        internalLeak: false,
       };
     } catch (err) {
       if (err.code === 'ERR_SSRF_BLOCKED' || (err.message && err.message.includes('SSRF blocked'))) {
@@ -1105,6 +1103,7 @@ async function probeLiveHost(subdomain) {
         return {
           url: targetUrl,
           subdomain,
+          hostType: 'blocked',
           statusCode: 0,
           title: ipRisk.title,
           latencyMs: 0,
@@ -1129,6 +1128,7 @@ async function probeLiveHost(subdomain) {
     return {
       url: `http://${subdomain}`,
       subdomain,
+      hostType: 'dns',
       statusCode: 0,
       title: '',
       latencyMs: dnsTime, // Real measured DNS latency
@@ -1137,6 +1137,8 @@ async function probeLiveHost(subdomain) {
       category,
       techStack: ['DNS Only (Web Ports Closed)'],
       takeoverRisk,
+      ssrfBlocked: false,
+      internalLeak: false,
     };
   }
 
@@ -1230,31 +1232,64 @@ async function executeReconWorkflow(scan) {
   scan.totalSubdomains = combined.length;
   appendLog(scan, `      Unique attack surface targets: ${scan.totalSubdomains} \x1b[32m✓\x1b[0m`);
 
-  // Stage 5: Active HTTP/TLS Probing & SSRF Defense
+  // Stage 5: Target Service Probing & SSRF Defense
   scan.step = 5;
-  scan.currentAction = 'Probing Live HTTP/TLS Services';
-  appendLog(scan, `[5/6] Probing Live HTTP/TLS Services & Checking SSRF Safeguards... `);
+  const allowActive = Boolean(scan.allowActiveProbing);
+  scan.currentAction = allowActive
+    ? 'Probing Live HTTP/TLS Services'
+    : 'Resolving DNS & Evaluating SSRF Boundaries';
+
+  if (allowActive) {
+    appendLog(scan, `[5/6] Probing Live HTTP/TLS Services & Checking SSRF Safeguards... `);
+    appendLog(scan, `      Permission confirmed: Active HTTP/HTTPS probing enabled.`);
+  } else {
+    appendLog(scan, `[5/6] Resolving DNS Records & Checking SSRF Safeguards... `);
+    appendLog(scan, `      Passive mode: Active HTTP probing disabled (permission not confirmed). Zero target HTTP packets.`);
+  }
 
   const aliveList = [];
   const batchSize = 6;
   for (let i = 0; i < combined.length; i += batchSize) {
     const chunk = combined.slice(i, i + batchSize);
-    const results = await Promise.all(chunk.map((sub) => probeLiveHost(sub)));
+    const results = await Promise.all(chunk.map((sub) => probeLiveHost(sub, allowActive)));
     for (const r of results) {
       if (r) {
         aliveList.push(r);
-        const logLine = r.internalLeak || r.ssrfBlocked
-          ? `      [INTERNAL IP LEAK / SSRF BLOCKED] ${r.subdomain} (Resolves to private IP: ${r.ip})`
-          : `      [ALIVE] ${r.url} [Status: ${r.statusCode || 'DNS'}] [${r.latencyMs}ms] ${r.title ? `"${r.title}"` : ''}`;
+        let logLine;
+        if (r.hostType === 'blocked') {
+          logLine = `      [INTERNAL IP LEAK / SSRF BLOCKED] ${r.subdomain} (Resolves to private IP: ${r.ip})`;
+        } else if (r.hostType === 'http') {
+          logLine = `      [HTTP LIVE] ${r.url} [Status: ${r.statusCode}] [${r.latencyMs}ms] ${r.title ? `"${r.title}"` : ''}`;
+        } else {
+          logLine = `      [DNS ONLY] ${r.subdomain} -> ${r.ip} [${r.latencyMs}ms DNS] (No HTTP response)`;
+        }
         appendLog(scan, logLine);
       }
     }
+
+    const httpHosts = aliveList.filter((h) => h.hostType === 'http');
+    const dnsHosts = aliveList.filter((h) => h.hostType === 'dns');
+    const blockedHosts = aliveList.filter((h) => h.hostType === 'blocked');
+
     scan.aliveHosts = [...aliveList];
-    scan.aliveCount = aliveList.length;
+    scan.httpHosts = httpHosts;
+    scan.dnsHosts = dnsHosts;
+    scan.blockedHosts = blockedHosts;
+
+    scan.httpCount = httpHosts.length;
+    scan.dnsCount = dnsHosts.length;
+    scan.blockedCount = blockedHosts.length;
+    scan.aliveCount = httpHosts.length; // strictly HTTP-responding live hosts!
+    scan.totalProbed = aliveList.length;
     broadcastScanUpdate(scan.id, scan);
   }
 
-  appendLog(scan, `      Live services verified: ${aliveList.length} \x1b[32m✓\x1b[0m`);
+  const httpCount = scan.httpCount;
+  const dnsCount = scan.dnsCount;
+  const blockedCount = scan.blockedCount;
+  appendLog(scan, `      HTTP-responding live web hosts : ${httpCount} \x1b[32m✓\x1b[0m`);
+  appendLog(scan, `      DNS-only resolvable hosts      : ${dnsCount} \x1b[36m✓\x1b[0m`);
+  appendLog(scan, `      Blocked internal/private hosts : ${blockedCount} ${blockedCount > 0 ? '\x1b[33m⚠\x1b[0m' : '\x1b[32m✓\x1b[0m'}`);
 
   // Stage 6: Report Compilation & Artifact Generation
   scan.step = 6;
@@ -1272,11 +1307,14 @@ async function executeReconWorkflow(scan) {
 ReconForge Reconnaissance Summary v2.1
 ===================================================
 
-Target Domain       : ${domain}
-Unique Subdomains   : ${scan.totalSubdomains}
-Live HTTP Services  : ${scan.aliveCount}
-Execution Time      : ${timeTaken} seconds
-Generated At        : ${dateStr}
+Target Domain                 : ${domain}
+Total Unique Subdomains       : ${scan.totalSubdomains}
+- HTTP Live Web Applications  : ${scan.httpCount}
+- DNS-Only Resolvable Hosts   : ${scan.dnsCount}
+- Blocked Internal / SSRF     : ${scan.blockedCount}
+Execution Time                : ${timeTaken} seconds
+Active Probing Authorized     : ${allowActive ? 'YES' : 'NO (Passive & DNS Only)'}
+Generated At                  : ${dateStr}
 
 Sources Consulted:
 - Certificate Transparency (crt.sh): ${crtResult.records.length} records
@@ -1295,7 +1333,10 @@ Sources Consulted:
 |-----------|-------|
 | Target Domain | \`${domain}\` |
 | Total Subdomains | **${scan.totalSubdomains}** |
-| Live Responding Services | **${scan.aliveCount}** |
+| HTTP Responding Live Services | **${scan.httpCount}** |
+| DNS-Only Resolvable Hosts | **${scan.dnsCount}** |
+| Blocked Internal / SSRF Hosts | **${scan.blockedCount}** |
+| Active Probing Authorized | ${allowActive ? '**Yes**' : '**No (Passive & DNS Only)**'} |
 | Execution Time | ${timeTaken} seconds |
 | Wildcard DNS | ${wildcardCheck.hasWildcard ? 'Active' : 'Disabled'} |
 | Date | ${dateStr} |
@@ -1310,26 +1351,44 @@ Sources Consulted:
 
 ---
 
-## Discovered Live Applications
+## Verified Live Web Applications (${scan.httpCount})
 
-| URL | Status | Latency | IP Address | Technologies | Title | Takeover Risk |
+${scan.httpCount > 0 ? `| URL | Status | Latency | IP Address | Technologies | Title | Takeover Risk |
 |-----|--------|---------|------------|--------------|-------|---------------|
-${aliveList.map(h => `| ${h.url} | ${h.statusCode || 'DNS'} | ${h.latencyMs}ms | ${h.ip || 'N/A'} | ${(h.techStack || []).join(', ') || 'Web Server'} | ${(h.title || '').replace(/\|/g, '-')} | ${h.takeoverRisk ? `${h.takeoverRisk.service} (${h.takeoverRisk.severity})` : 'None'} |`).join('\n')}
+${scan.httpHosts.map(h => `| ${h.url} | ${h.statusCode} OK | ${h.latencyMs}ms | ${h.ip || 'N/A'} | ${(h.techStack || []).join(', ') || 'Web Server'} | ${(h.title || '').replace(/\|/g, '-')} | ${h.takeoverRisk ? `${h.takeoverRisk.service} (${h.takeoverRisk.severity})` : 'None'} |`).join('\n')}` : '_No HTTP-responding web applications detected or active probing was disabled._'}
 
+---
+
+## DNS-Only Resolvable Subdomains (${scan.dnsCount})
+
+${scan.dnsCount > 0 ? `| Subdomain | IP Address | Latency | Notes | Takeover Risk |
+|-----------|------------|---------|-------|---------------|
+${scan.dnsHosts.map(h => `| ${h.subdomain} | ${h.ip || 'N/A'} | ${h.latencyMs}ms | ${(h.techStack || []).join(', ')} | ${h.takeoverRisk ? `${h.takeoverRisk.service} (${h.takeoverRisk.severity})` : 'None'} |`).join('\n')}` : '_No DNS-only subdomains._'}
+
+${scan.blockedCount > 0 ? `---
+
+## Blocked Internal IP Addresses / SSRF Protection (${scan.blockedCount})
+
+| Subdomain | Private IP | Finding | Severity |
+|-----------|------------|---------|----------|
+${scan.blockedHosts.map(h => `| ${h.subdomain} | ${h.ip} | ${h.title || 'SSRF Blocked'} | ${h.ipRisk?.severity || 'HIGH'} |`).join('\n')}
+` : ''}
 ---
 
 Generated by ReconForge v2.1
 `;
 
   const subdomainsTxt = combined.join('\n');
-  const aliveTxt = aliveList.map(h => h.url).join('\n');
+  const aliveTxt = scan.httpHosts.map((h) => h.url).join('\n');
   const reconLog = `==================================================
 
 ${dateStr}
 
 Target          : ${domain}
 Total Targets   : ${scan.totalSubdomains}
-Live Services   : ${scan.aliveCount}
+HTTP Live       : ${scan.httpCount}
+DNS Only        : ${scan.dnsCount}
+Blocked Internal: ${scan.blockedCount}
 Execution Time  : ${timeTaken} seconds
 Status          : SUCCESS
 
@@ -1388,166 +1447,212 @@ Status          : SUCCESS
   sseClients.delete(scan.id);
 }
 
-// API Routes
-app.post('/api/recon/start', async (req, res) => {
-  // Session token validation strictly via header prevents Cross-Origin Scanner Hijacking
-  const clientToken = req.headers['x-reconforge-session'];
-  if (!isTokenValid(clientToken)) {
-    return res.status(403).json({
-      error: 'Forbidden: Missing or invalid x-reconforge-session header. Scanner hijacking protection active.',
-    });
-  }
+// Express Application Factory with Workflow Dependency Injection
+export function createApp({ runWorkflow = executeReconWorkflow } = {}) {
+  const app = express();
 
-  // Concurrency throttle: prevent background resource exhaustion
-  let activeRunningCount = 0;
-  for (const s of scans.values()) {
-    if (s.status === 'running') activeRunningCount++;
-  }
-  if (activeRunningCount >= MAX_CONCURRENT_RUNNING) {
-    return res.status(429).json({
-      error: `Too Many Requests: Maximum concurrent active scans reached (${MAX_CONCURRENT_RUNNING}). Please wait for an active scan to complete.`,
-    });
-  }
-
-  const rawDomain = req.body?.domain;
-  if (!rawDomain) {
-    return res.status(400).json({ error: 'Target domain is required (e.g. example.com)' });
-  }
-
-  const domain = sanitizeDomain(String(rawDomain));
-  if (!isValidDomain(domain)) {
-    return res.status(400).json({ error: 'Invalid domain syntax. Examples: example.com, hackerone.com' });
-  }
-
-  const scanId = `scan_${domain.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}`;
-  const scanData = {
-    id: scanId,
-    domain,
-    status: 'running',
-    startTime: Date.now(),
-    step: 0,
-    currentAction: 'Initializing scope',
-    totalSubdomains: 0,
-    aliveCount: 0,
-    subdomains: [],
-    aliveHosts: [],
-    logs: [],
-    files: {
-      subdomainsTxt: '',
-      aliveTxt: '',
-      summaryTxt: '',
-      reportMd: '',
-      reconLog: '',
+  app.use(cors({
+    origin: (origin, callback) => {
+      if (isAllowedOrigin(origin)) {
+        callback(null, true);
+      } else {
+        callback(null, false);
+      }
     },
-  };
-
-  storeScan(scanId, scanData);
-
-  // In automated test environments, avoid spawning unmocked live OSINT scans against public targets
-  if (process.env.NODE_ENV !== 'test') {
-    executeReconWorkflow(scanData).catch((err) => {
-      console.error('Workflow error:', err);
-      scanData.status = 'failed';
-      scanData.error = err?.message || 'Workflow execution error';
-      appendLog(scanData, `\x1b[31m[ERROR] Scan failed: ${scanData.error}\x1b[0m`);
-      broadcastScanUpdate(scanData.id, scanData);
-    });
-  }
-
-  return res.json({ scanId, domain, status: 'running' });
-});
-
-// Read Endpoints: Protected by Inbound Host Header validation (preventing DNS rebinding)
-// and strict CORS exact-origin matching (enforcing browser Same-Origin Policy isolation).
-app.get('/api/recon/stream/:scanId', (req, res) => {
-  const { scanId } = req.params;
-  const scan = getScan(scanId);
-
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders?.();
-
-  if (!scan) {
-    res.write(`data: ${JSON.stringify({ error: 'Scan not found' })}\n\n`);
-    res.end();
-    return;
-  }
-
-  let clientList = sseClients.get(scanId);
-  if (!clientList) {
-    clientList = [];
-    sseClients.set(scanId, clientList);
-  }
-  clientList.push(res);
-
-  // Send initial full scan state upon connection
-  res.write(`data: ${JSON.stringify(scan)}\n\n`);
-
-  req.on('close', () => {
-    const list = sseClients.get(scanId) || [];
-    sseClients.set(scanId, list.filter(c => c !== res));
-  });
-});
-
-app.get('/api/recon/scan/:scanId', (req, res) => {
-  const { scanId } = req.params;
-  const scan = getScan(scanId);
-  if (!scan) return res.status(404).json({ error: 'Scan not found' });
-  return res.json(scan);
-});
-
-app.get('/api/recon/history', (_req, res) => {
-  const list = Array.from(scans.values()).map(s => ({
-    id: s.id,
-    domain: s.domain,
-    status: s.status,
-    startTime: s.startTime,
-    endTime: s.endTime,
-    executionTime: s.executionTime,
-    totalSubdomains: s.totalSubdomains,
-    aliveCount: s.aliveCount,
+    credentials: false, // Explicitly false
   }));
-  return res.json(list.reverse());
-});
 
-app.get('/api/recon/download/:scanId/:fileType', (req, res) => {
-  const { scanId, fileType } = req.params;
-  const scan = getScan(scanId);
-  if (!scan) return res.status(404).send('Scan not found');
+  app.use(express.json());
 
-  switch (fileType) {
-    case 'subdomains':
-      res.setHeader('Content-Disposition', `attachment; filename="${scan.domain}_subdomains.txt"`);
-      res.setHeader('Content-Type', 'text/plain');
-      return res.send(scan.files.subdomainsTxt);
+  // Inbound DNS Rebinding Protection Middleware: Validates Host header on all /api routes
+  app.use('/api', (req, res, next) => {
+    const host = req.headers.host;
+    if (!isValidHostHeader(host)) {
+      return res.status(403).json({
+        error: 'Forbidden: Invalid Host header (Inbound DNS Rebinding protection)',
+      });
+    }
+    next();
+  });
 
-    case 'alive':
-      res.setHeader('Content-Disposition', `attachment; filename="${scan.domain}_alive.txt"`);
-      res.setHeader('Content-Type', 'text/plain');
-      return res.send(scan.files.aliveTxt);
+  app.get('/api/session', (_req, res) => {
+    res.json({ token: SESSION_TOKEN });
+  });
 
-    case 'summary':
-      res.setHeader('Content-Disposition', `attachment; filename="${scan.domain}_summary.txt"`);
-      res.setHeader('Content-Type', 'text/plain');
-      return res.send(scan.files.summaryTxt);
+  // API Routes
+  app.post('/api/recon/start', async (req, res) => {
+    // Session token validation strictly via header prevents Cross-Origin Scanner Hijacking
+    const clientToken = req.headers['x-reconforge-session'];
+    if (!isTokenValid(clientToken)) {
+      return res.status(403).json({
+        error: 'Forbidden: Missing or invalid x-reconforge-session header. Scanner hijacking protection active.',
+      });
+    }
 
-    case 'report':
-      res.setHeader('Content-Disposition', `attachment; filename="${scan.domain}_report.md"`);
-      res.setHeader('Content-Type', 'text/markdown');
-      return res.send(scan.files.reportMd);
+    // Concurrency throttle: prevent background resource exhaustion
+    let activeRunningCount = 0;
+    for (const s of scans.values()) {
+      if (s.status === 'running') activeRunningCount++;
+    }
+    if (activeRunningCount >= MAX_CONCURRENT_RUNNING) {
+      return res.status(429).json({
+        error: `Too Many Requests: Maximum concurrent active scans reached (${MAX_CONCURRENT_RUNNING}). Please wait for an active scan to complete.`,
+      });
+    }
 
-    case 'log':
-      res.setHeader('Content-Disposition', `attachment; filename="recon.log"`);
-      res.setHeader('Content-Type', 'text/plain');
-      return res.send(scan.files.reconLog);
+    const { domain: rawDomain, allowActiveProbing = false } = req.body || {};
+    if (!rawDomain) {
+      return res.status(400).json({ error: 'Target domain is required (e.g. example.com)' });
+    }
 
-    default:
-      return res.status(400).send('Invalid file type');
-  }
-});
+    const domain = sanitizeDomain(String(rawDomain));
+    if (!isValidDomain(domain)) {
+      return res.status(400).json({ error: 'Invalid domain syntax. Examples: example.com, hackerone.com' });
+    }
 
-export { app };
+    const scanId = `scan_${domain.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}`;
+    const scanData = {
+      id: scanId,
+      domain,
+      status: 'running',
+      startTime: Date.now(),
+      step: 0,
+      currentAction: 'Initializing scope',
+      allowActiveProbing: Boolean(allowActiveProbing),
+      totalSubdomains: 0,
+      aliveCount: 0,
+      httpCount: 0,
+      dnsCount: 0,
+      blockedCount: 0,
+      subdomains: [],
+      aliveHosts: [],
+      httpHosts: [],
+      dnsHosts: [],
+      blockedHosts: [],
+      logs: [],
+      files: {
+        subdomainsTxt: '',
+        aliveTxt: '',
+        summaryTxt: '',
+        reportMd: '',
+        reconLog: '',
+      },
+    };
+
+    storeScan(scanId, scanData);
+
+    // Invoke injected workflow runner (pure dependency injection, no NODE_ENV branching)
+    const workflowPromise = runWorkflow(scanData);
+    if (workflowPromise && typeof workflowPromise.catch === 'function') {
+      workflowPromise.catch((err) => {
+        console.error('Workflow error:', err);
+        scanData.status = 'failed';
+        scanData.error = err?.message || 'Workflow execution error';
+        appendLog(scanData, `\x1b[31m[ERROR] Scan failed: ${scanData.error}\x1b[0m`);
+        broadcastScanUpdate(scanData.id, scanData);
+      });
+    }
+
+    return res.json({ scanId, domain, status: 'running' });
+  });
+
+  // Read Endpoints: Protected by Inbound Host Header validation (preventing DNS rebinding)
+  // and strict CORS exact-origin matching (enforcing browser Same-Origin Policy isolation).
+  app.get('/api/recon/stream/:scanId', (req, res) => {
+    const { scanId } = req.params;
+    const scan = getScan(scanId);
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    if (!scan) {
+      res.write(`data: ${JSON.stringify({ error: 'Scan not found' })}\n\n`);
+      res.end();
+      return;
+    }
+
+    let clientList = sseClients.get(scanId);
+    if (!clientList) {
+      clientList = [];
+      sseClients.set(scanId, clientList);
+    }
+    clientList.push(res);
+
+    // Send initial full scan state upon connection
+    res.write(`data: ${JSON.stringify(scan)}\n\n`);
+
+    req.on('close', () => {
+      const list = sseClients.get(scanId) || [];
+      sseClients.set(scanId, list.filter(c => c !== res));
+    });
+  });
+
+  app.get('/api/recon/scan/:scanId', (req, res) => {
+    const { scanId } = req.params;
+    const scan = getScan(scanId);
+    if (!scan) return res.status(404).json({ error: 'Scan not found' });
+    return res.json(scan);
+  });
+
+  app.get('/api/recon/history', (_req, res) => {
+    const list = Array.from(scans.values()).map(s => ({
+      id: s.id,
+      domain: s.domain,
+      status: s.status,
+      startTime: s.startTime,
+      endTime: s.endTime,
+      executionTime: s.executionTime,
+      totalSubdomains: s.totalSubdomains,
+      aliveCount: s.aliveCount,
+      httpCount: s.httpCount || 0,
+      dnsCount: s.dnsCount || 0,
+      blockedCount: s.blockedCount || 0,
+    }));
+    return res.json(list.reverse());
+  });
+
+  app.get('/api/recon/download/:scanId/:fileType', (req, res) => {
+    const { scanId, fileType } = req.params;
+    const scan = getScan(scanId);
+    if (!scan) return res.status(404).send('Scan not found');
+
+    switch (fileType) {
+      case 'subdomains':
+        res.setHeader('Content-Disposition', `attachment; filename="${scan.domain}_subdomains.txt"`);
+        res.setHeader('Content-Type', 'text/plain');
+        return res.send(scan.files.subdomainsTxt);
+
+      case 'alive':
+        res.setHeader('Content-Disposition', `attachment; filename="${scan.domain}_alive.txt"`);
+        res.setHeader('Content-Type', 'text/plain');
+        return res.send(scan.files.aliveTxt);
+
+      case 'summary':
+        res.setHeader('Content-Disposition', `attachment; filename="${scan.domain}_summary.txt"`);
+        res.setHeader('Content-Type', 'text/plain');
+        return res.send(scan.files.summaryTxt);
+
+      case 'report':
+        res.setHeader('Content-Disposition', `attachment; filename="${scan.domain}_report.md"`);
+        res.setHeader('Content-Type', 'text/markdown');
+        return res.send(scan.files.reportMd);
+
+      case 'log':
+        res.setHeader('Content-Disposition', `attachment; filename="recon.log"`);
+        res.setHeader('Content-Type', 'text/plain');
+        return res.send(scan.files.reconLog);
+
+      default:
+        return res.status(400).send('Invalid file type');
+    }
+  });
+
+  return app;
+}
+
+export const app = createApp();
 
 async function startServer() {
   if (!isProd) {

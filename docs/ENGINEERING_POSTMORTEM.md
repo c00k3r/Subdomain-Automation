@@ -4,13 +4,13 @@
 
 ReconForge was conceived to solve a recurring operational friction in offensive security workflows: running reconnaissance and surface mapping on client targets typically requires configuring external toolchains (`subfinder`, `assetfinder`, `httpx`), managing external binary PATHs, and manually correlating output files into reports.
 
-Our goal was to build a **native Node.js reconnaissance and service-probing engine** (requiring no external Go or Python binaries) paired with a real-time reactive desktop GUI, while strictly safeguarding the researcher's host environment against Server-Side Request Forgery (SSRF), DNS rebinding, and cross-origin scanner hijacking.
+Our goal was to build a **native Node.js reconnaissance and service-probing engine** (requiring no external Go or Python binaries) paired with a real-time reactive local web app interface, while strictly safeguarding the researcher's host environment against Server-Side Request Forgery (SSRF), DNS rebinding, and cross-origin scanner hijacking.
 
 ---
 
 ## 2. Architecture & Pipeline Design
 
-ReconForge uses a **dual-stage discovery pipeline** separating non-intrusive intelligence gathering from active host verification:
+ReconForge uses a **6-stage discovery pipeline** separating non-intrusive intelligence gathering from active host verification:
 
 ```text
 [ Target FQDN ]
@@ -25,8 +25,8 @@ ReconForge uses a **dual-stage discovery pipeline** separating non-intrusive int
 [ Stage 4: Wildcard Filter ] ──── Discard speculative guesses; preserve CT cryptographic records
        │
        ▼
-[ Stage 5: Active Probing ] ───── Connect-Time SSRF Socket Guard (lookup hook)
-       │                         HTTP/HTTPS dual-stack status, latency, headers
+[ Stage 5: Active Probing ] ───── Gated by explicit permission checkbox; connect-time SSRF socket guard
+       │                         HTTP/HTTPS dual-stack status, latency, headers, tech fingerprint
        │                         Dangling CNAME Takeover Heuristics (per-resource DNS)
        ▼
 [ Stage 6: Export & Visuals ] ── Markdown report, summary.txt, alive.txt, Canvas Topology
@@ -61,7 +61,7 @@ During our iterative hardening process, we uncovered and systematically eliminat
 ### Issue D: Subdomain Takeover Signal Calibration
 - **What Was Broken**: Dead CNAMEs pointing to `*.amazonaws.com` (such as decommissioned ELBs) were reported as "Critical S3 Takeovers". Furthermore, checking NXDOMAIN on shared anycast providers (like GitHub Pages or S3) yielded false assumptions, while resolver timeouts (`ESERVFAIL`) produced phantom takeover warnings.
 - **The Fix**:
-  1. Implemented a tightened regional S3 regex (`/^(?:[a-z0-9.-]+\.)?s3(?:(?:\.[a-z0-9-]+)?|-website[.-][a-z0-9-]+|-(?:[a-z]{2,}-[a-z]+-\d+))?\.amazonaws\.com$/i`) that explicitly excludes ELB domains and arbitrary prefixes like `s3-evil.amazonaws.com`.
+  1. Implemented a tightened regional S3 regex (`/^(?:[a-z0-9.-]+\.)?s3(?:\.dualstack)?(?:(?:\.[a-z0-9-]+)+|-website[.-][a-z0-9-]+|-(?:[a-z]{2,}-[a-z]+-\d+))?\.amazonaws\.com$/i`) that explicitly supports `s3.dualstack.<region>` endpoints while excluding ELB domains and arbitrary prefixes like `s3-evil.amazonaws.com`.
   2. Added a `perResourceDns: true/false` flag to `TAKEOVER_SERVICES`: NXDOMAIN target checks are *only* executed for providers that de-register DNS records upon resource teardown (AWS Elastic Beanstalk, Azure Web App, Azure Traffic Manager). Shared anycast platforms rely exclusively on HTTP status and response-body fingerprinting.
   3. Resolver errors other than genuine `ENOTFOUND` (such as `ESERVFAIL` or `ETIMEOUT`) are ignored.
 
@@ -77,29 +77,31 @@ During our iterative hardening process, we uncovered and systematically eliminat
 
 ---
 
-## 4. Evaluation Methodology: Establishing Ground Truth
+## 4. Evaluation Methodology: Future Validation Plan via Controlled Test Zone
 
-In offensive tooling and asset discovery, measuring true precision and recall requires establishing an authoritative **ground truth**.
+This section outlines our future experimental validation plan rather than claiming empirical recall or precision evidence.
 
 ### Why Third-Party Public Domains Do Not Provide Ground Truth
-Comparing tool outputs on arbitrary third-party domains (such as bug bounty scopes or public sites) only measures **source overlap**, not true recall:
+Comparing tool outputs on arbitrary third-party domains (such as public targets or bug bounty programs) only measures **source overlap**, not true recall:
 - **Unknown Total Population**: Without authoritative zone records, the total set of existing subdomains is unknown ($TP + FN$).
 - **Unresolvable Records**: Passive sources frequently index historical DNS records or expired certificates that no longer resolve. Labeling an unresolvable passive record as either a "true positive" or a "false positive" without authoritative zone context is methodologically invalid.
-- **Authorization Boundaries**: While passive intelligence gathering (Stages 1–3) queries public logs, active service probing (Stage 5) transmits direct HTTP/HTTPS requests to discovered endpoints. Active probing must only be performed against assets you own or have explicit, written authorization to test.
+- **Authorization Boundaries**: While passive intelligence gathering (Stages 1–4) queries public logs with zero packet exposure to the target, active service probing (Stage 5) transmits direct HTTP/HTTPS requests to discovered endpoints. Active probing is gated behind an explicit permission confirmation checkbox and must only be executed against domains you own or have written permission to test.
 
-### Recommended Ground Truth Testing Protocol
-To rigorously evaluate discovery precision and recall, security teams should execute benchmarks against an owned, authoritative DNS zone:
+### Planned Ground Truth Testing Protocol
+To rigorously evaluate discovery precision and recall without speculative claims, our planned next milestone is to execute benchmarks against an owned, authoritative DNS zone:
 
 1. **Controlled Zone Setup**: Configure an authoritative DNS zone (e.g., `test-zone.net`) with known, pre-determined asset categories:
    - 20 static `A` / `AAAA` production records.
    - 5 wildcard-matching test subdomains under `*.wildcard.test-zone.net`.
    - 3 intentional dangling CNAME records pointing to NXDOMAIN targets across both per-resource providers (e.g. AWS Elastic Beanstalk) and anycast providers.
    - At least 2 certificates pre-logged to Certificate Transparency (e.g. via Let's Encrypt staging/production).
-2. **Measurement Criteria**:
+2. **Planned Measurement Criteria**:
    - **Precision**: $\frac{\text{True Active Subdomains Discovered}}{\text{Total Subdomains Reported by Engine}}$
    - **Recall**: $\frac{\text{Configured Zone Assets Discovered}}{\text{Total Known Configured Zone Assets}}$
    - **Wildcard Resilience**: Number of bogus/non-existent wildcard labels incorrectly elevated to verified active assets.
 3. **Reproducibility**: Run automated test runs across multiple independent DNS resolvers (`1.1.1.1`, `8.8.8.8`, local recursive), capturing full raw JSON output files and network trace logs.
+
+*Note: Until the controlled test zone is configured and the raw execution outputs and evaluation scripts are committed to the repository, no empirical recall or precision percentages are claimed.*
 
 ---
 
@@ -111,12 +113,12 @@ The codebase includes an automated unit test suite executed via Node's native te
 npm test
 ```
 
-### Verified Test Invariants (13/13 Passing)
+### Verified Test Invariants (14/14 Passing)
 
 ```text
 ✔ sanitizeDomain - normalizes raw user inputs
 ✔ isValidDomain - strictly validates FQDNs and Punycode IDNs
-✔ Invariant: isValidDomain rejects IP literals so Node never skips lookup hook
+✔ Invariant: isValidDomain rejects IP literals so Node never skips the lookup hook
 ✔ isPrivateOrReservedIp - fails closed on invalid input and blocks all SSRF vectors
 ✔ classifyIpRisk - accurately classifies internal IP ranges with tiered severities
 ✔ isTokenValid - performs constant-time cryptographic token verification
@@ -126,6 +128,7 @@ npm test
 ✔ detectWildcardDNS - tests both IPv4 and IPv6 canary addresses
 ✔ checkTakeoverRisk - verified per-resource cloud services, regional S3 regex, and NXDOMAIN logic
 ✔ Live Express API tests: Host header rebinding protection, read routes, session tokens & 429 throttle
+✔ Workflow runner injection: mocked workflow runs to completion and populates split host categories
 ✔ Live SSRF defense: verifies connection-time hook blocks loopback and local server receives 0 hits
 ```
 

@@ -3,11 +3,12 @@ import { Search, Globe, Shield, ArrowRight, Zap, CheckCircle } from 'lucide-reac
 
 export const ScannerHero = ({ onStartScan, isScanning, errorMessage }) => {
   const [domain, setDomain] = useState('');
+  const [allowActiveProbing, setAllowActiveProbing] = useState(false);
 
   const handleSubmit = (e) => {
     e.preventDefault();
     if (domain.trim()) {
-      onStartScan(domain.trim());
+      onStartScan(domain.trim(), allowActiveProbing);
     }
   };
 
@@ -37,7 +38,7 @@ export const ScannerHero = ({ onStartScan, isScanning, errorMessage }) => {
       </div>
 
       {/* Main Clean Input Box */}
-      <div className="bg-[#161822] border border-[#262b3b] rounded-2xl p-3 sm:p-4 shadow-2xl">
+      <div className="bg-[#161822] border border-[#262b3b] rounded-2xl p-3 sm:p-4 shadow-2xl space-y-3">
         <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-2.5">
           <div className="relative flex-1">
             <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-500">
@@ -64,9 +65,25 @@ export const ScannerHero = ({ onStartScan, isScanning, errorMessage }) => {
           </button>
         </form>
 
+        {/* Authorization & Permission Checkbox */}
+        <div className="pt-2 px-1">
+          <label className="flex items-start space-x-2.5 text-xs text-slate-300 cursor-pointer select-none bg-[#0e1017]/60 p-2.5 rounded-xl border border-[#202533] hover:border-slate-700 transition-colors">
+            <input
+              type="checkbox"
+              checked={allowActiveProbing}
+              onChange={(e) => setAllowActiveProbing(e.target.checked)}
+              disabled={isScanning}
+              className="mt-0.5 rounded border-slate-700 text-indigo-600 focus:ring-indigo-500 bg-[#161822] cursor-pointer"
+            />
+            <span className="leading-snug">
+              Enable <strong className="text-white">Stage 5 Active HTTP Probing</strong> (I confirm I own this domain or have written permission to actively probe it)
+            </span>
+          </label>
+        </div>
+
         {/* Quick Suggestion Buttons */}
-        <div className="mt-4 pt-3.5 border-t border-[#202533] flex flex-wrap items-center justify-between gap-2 text-xs">
-          <span className="text-slate-400 font-medium">Try an authorized target:</span>
+        <div className="pt-3 border-t border-[#202533] flex flex-wrap items-center justify-between gap-2 text-xs">
+          <span className="text-slate-400 font-medium">Example public targets:</span>
           <div className="flex flex-wrap gap-1.5">
             {presets.map((preset) => (
               <button
@@ -74,7 +91,7 @@ export const ScannerHero = ({ onStartScan, isScanning, errorMessage }) => {
                 type="button"
                 onClick={() => {
                   setDomain(preset.domain);
-                  onStartScan(preset.domain);
+                  onStartScan(preset.domain, allowActiveProbing);
                 }}
                 className="px-2.5 py-1 rounded-lg bg-[#0e1017] hover:bg-indigo-500/20 hover:text-indigo-300 text-slate-300 border border-[#232736] transition-colors"
               >
@@ -99,7 +116,7 @@ export const ScannerHero = ({ onStartScan, isScanning, errorMessage }) => {
           </div>
           <h3 className="font-semibold text-sm text-white">Passive Discovery</h3>
           <p className="text-xs text-slate-400 leading-relaxed">
-            Extracts Certificate Transparency logs (crt.sh) and threat feeds (AlienVault OTX, HackerTarget) with zero target packet exposure.
+            Extracts Certificate Transparency logs (crt.sh) and threat feeds (AlienVault OTX, HackerTarget) with zero target packet exposure during passive stages (Stages 1–4).
           </p>
         </div>
 
@@ -109,7 +126,7 @@ export const ScannerHero = ({ onStartScan, isScanning, errorMessage }) => {
           </div>
           <h3 className="font-semibold text-sm text-white">Live Host Probing</h3>
           <p className="text-xs text-slate-400 leading-relaxed">
-            Tests each subdomain via HTTP/HTTPS to detect responding web applications and titles.
+            Tests each subdomain via HTTP/HTTPS to detect responding web applications and titles when permission is confirmed.
           </p>
         </div>
 

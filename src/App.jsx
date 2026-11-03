@@ -169,7 +169,7 @@ export default function App() {
     }, 1000);
   };
 
-  const handleStartScan = async (domain) => {
+  const handleStartScan = async (domain, allowActiveProbing = false) => {
     setErrorMessage(null);
     setIsScanning(true);
     setCurrentView('scanning');
@@ -186,7 +186,7 @@ export default function App() {
           'Content-Type': 'application/json',
           'x-reconforge-session': token || '',
         },
-        body: JSON.stringify({ domain }),
+        body: JSON.stringify({ domain, allowActiveProbing }),
       });
 
       if (!res.ok) {
