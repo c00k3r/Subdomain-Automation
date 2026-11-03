@@ -25,10 +25,12 @@ All notable changes to ReconForge are documented in this file adhering to [Keep 
 - **Live SSRF Test Suite**: Integrated real loopback probe tests verifying that local mock servers receive 0 incoming requests when probed.
 
 ### Recon Engine Corrections & Heuristics
+- **Scan Concurrency Throttle**: Added `MAX_CONCURRENT_RUNNING = 3` limit on `POST /api/recon/start` returning `429 Too Many Requests` when saturated, strictly protecting active scans from resource starvation or LRU cache eviction.
 - **Dual-Stack Wildcard Detection**: Upgraded canary probing in `detectWildcardDNS` to generate separate IPv4 and IPv6 canary labels, catching IPv6-only wildcard zones.
 - **Passive Record Preservation**: Refactored Stage 4 pipeline to preserve all cryptographic Certificate Transparency and passive DNS hits under wildcard zones, skipping only speculative dictionary guesses.
-- **Per-Resource Subdomain Takeover Detection**: Traverses CNAME chains, tests targets against exact provider suffixes, and verifies true NXDOMAIN (`ENOTFOUND`) on per-resource cloud services (AWS Elastic Beanstalk, Azure Web App, Azure Traffic Manager, Fastly, Ghost, GitHub Pages, Amazon S3).
-- **Classified Internal IP Reporting**: Differentiates internal/reserved IPs by range with accurate severity tiers (loopback as INFO 'Localhost / Loopback Mapping', RFC 1918 & IPv6 ULA as MEDIUM, cloud IMDS / link-local as HIGH, CGNAT & multicast as LOW).
+- **Regional S3 Takeover Coverage**: Extended S3 takeover detection with a worldwide regional and website regex (`/^(?:[a-z0-9.-]+\.)?s3(?:[\.-]website)?(?:[\.-][a-z0-9-]+)?\.amazonaws\.com$/i`) while strictly filtering out ELB domains.
+- **Per-Resource Subdomain Takeover Detection**: Added `perResourceDns: true/false` flags to ensure target NXDOMAIN (`ENOTFOUND`) resolution is only evaluated for providers that de-register DNS records upon resource release (AWS Elastic Beanstalk, Azure Web App, Azure Traffic Manager), while shared anycast providers rely on response fingerprinting.
+- **BlockList IP Classification**: Differentiates internal/reserved IPs by range using dedicated `net.BlockList` instances with embedded IPv4 unwrapping (`unwrapEmbeddedIPv4`), ensuring `::ffff:127.0.0.2` and other encodings accurately map to their appropriate severity tiers (loopback as INFO, RFC 1918 & IPv6 ULA as MEDIUM, cloud IMDS / link-local as HIGH, CGNAT & multicast as LOW).
 
 ---
 

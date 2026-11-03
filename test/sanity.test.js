@@ -168,6 +168,18 @@ test('classifyIpRisk - accurately classifies internal IP ranges with tiered seve
   const multi = classifyIpRisk('224.0.0.1');
   assert.equal(multi.severity, 'LOW');
   assert.equal(multi.title, 'Reserved / Multicast IP Address');
+
+  // Unwrapped/Decoded IPv4 addresses (IPv4-mapped and NAT64)
+  const mappedLoopback = classifyIpRisk('::ffff:127.0.0.2');
+  assert.equal(mappedLoopback.severity, 'INFO', '::ffff:127.0.0.2 must unwrap to 127.0.0.2 and classify as INFO');
+  assert.equal(mappedLoopback.title, 'Localhost / Loopback Mapping');
+
+  const mappedRfc1918 = classifyIpRisk('::ffff:10.0.0.1');
+  assert.equal(mappedRfc1918.severity, 'MEDIUM', '::ffff:10.0.0.1 must unwrap and classify as RFC 1918 leak');
+  assert.equal(mappedRfc1918.title, 'Internal IP Leak / RFC 1918 Exposure');
+
+  const nat64Loopback = classifyIpRisk('64:ff9b::7f00:1');
+  assert.equal(nat64Loopback.severity, 'INFO', 'NAT64 loopback must unwrap to 127.0.0.1 and classify as INFO');
 });
 
 test('isTokenValid - performs constant-time cryptographic token verification', () => {
@@ -270,7 +282,7 @@ test('detectWildcardDNS - tests both IPv4 and IPv6 canary addresses', async () =
   assert.deepEqual(resClean.wildcardIps, []);
 });
 
-test('checkTakeoverRisk - verified per-resource cloud services and exact S3 suffixes', async () => {
+test('checkTakeoverRisk - verified per-resource cloud services, regional S3 regex, and NXDOMAIN logic', async () => {
   const nxDomainTargetResolver = async () => {
     const err = new Error('ENOTFOUND');
     err.code = 'ENOTFOUND';
@@ -288,12 +300,12 @@ test('checkTakeoverRisk - verified per-resource cloud services and exact S3 suff
   );
   assert.equal(elbRes, null, 'Dead ELB CNAME must NOT be reported as S3 takeover');
 
-  // 2. Exact S3 suffix (.s3.amazonaws.com) with NXDOMAIN -> Likely Takeover
+  // 2. Exact S3 suffix (.s3.amazonaws.com) with 404 + HTTP bucket fingerprint -> Likely Takeover
   const s3CnameResolver = async () => ['abandoned-bucket.s3.amazonaws.com'];
   const s3Res = await checkTakeoverRisk(
     'assets.target.com',
-    0,
-    '',
+    404,
+    'The specified bucket does not exist',
     s3CnameResolver,
     nxDomainTargetResolver
   );
@@ -302,7 +314,42 @@ test('checkTakeoverRisk - verified per-resource cloud services and exact S3 suff
   assert.equal(s3Res.certainty, 'Likely');
   assert.equal(s3Res.service, 'Amazon S3');
 
-  // 3. AWS Elastic Beanstalk per-resource CNAME (.elasticbeanstalk.com) with NXDOMAIN -> Likely Takeover
+  // 3. Regional S3 endpoint (bucket.s3.us-west-2.amazonaws.com) with 404 -> Likely Takeover
+  const s3RegionalResolver = async () => ['my-bucket.s3.us-west-2.amazonaws.com'];
+  const s3RegionalRes = await checkTakeoverRisk(
+    'cdn.target.com',
+    404,
+    'NoSuchBucket',
+    s3RegionalResolver,
+    nxDomainTargetResolver
+  );
+  assert.ok(s3RegionalRes);
+  assert.equal(s3RegionalRes.service, 'Amazon S3');
+  assert.equal(s3RegionalRes.certainty, 'Likely');
+
+  // 4. Regional S3 website endpoint (bucket.s3-website.eu-central-1.amazonaws.com) -> Likely Takeover
+  const s3WebsiteResolver = async () => ['static.s3-website.eu-central-1.amazonaws.com'];
+  const s3WebsiteRes = await checkTakeoverRisk(
+    'web.target.com',
+    404,
+    'NoSuchBucket',
+    s3WebsiteResolver,
+    nxDomainTargetResolver
+  );
+  assert.ok(s3WebsiteRes);
+  assert.equal(s3WebsiteRes.service, 'Amazon S3');
+
+  // 5. Shared anycast services (S3 / GitHub Pages) do NOT trigger takeover on NXDOMAIN without HTTP fingerprint
+  const s3EmptyBodyRes = await checkTakeoverRisk(
+    'assets.target.com',
+    0,
+    '',
+    s3CnameResolver,
+    nxDomainTargetResolver
+  );
+  assert.equal(s3EmptyBodyRes, null, 'S3 with empty body should not trigger NXDOMAIN takeover because S3 is perResourceDns=false');
+
+  // 6. AWS Elastic Beanstalk (perResourceDns: true) with NXDOMAIN -> Likely Takeover
   const ebCnameResolver = async () => ['my-env.elasticbeanstalk.com'];
   const ebRes = await checkTakeoverRisk(
     'api.target.com',
@@ -316,7 +363,31 @@ test('checkTakeoverRisk - verified per-resource cloud services and exact S3 suff
   assert.equal(ebRes.certainty, 'Likely');
   assert.equal(ebRes.service, 'AWS Elastic Beanstalk');
 
-  // 4. ESERVFAIL must NOT trigger takeover false positive
+  // 7. Azure Web App (perResourceDns: true) with NXDOMAIN -> Likely Takeover
+  const azureCnameResolver = async () => ['my-service.azurewebsites.net'];
+  const azureRes = await checkTakeoverRisk(
+    'portal.target.com',
+    0,
+    '',
+    azureCnameResolver,
+    nxDomainTargetResolver
+  );
+  assert.ok(azureRes);
+  assert.equal(azureRes.service, 'Azure Web App');
+
+  // 8. Azure Traffic Manager (perResourceDns: true) with NXDOMAIN -> Likely Takeover
+  const tmCnameResolver = async () => ['traffic-prod.trafficmanager.net'];
+  const tmRes = await checkTakeoverRisk(
+    'routing.target.com',
+    0,
+    '',
+    tmCnameResolver,
+    nxDomainTargetResolver
+  );
+  assert.ok(tmRes);
+  assert.equal(tmRes.service, 'Azure Traffic Manager');
+
+  // 9. Resolver ESERVFAIL must NOT trigger takeover false positive
   const servFailResolver = async () => {
     const err = new Error('ESERVFAIL');
     err.code = 'ESERVFAIL';
@@ -332,7 +403,7 @@ test('checkTakeoverRisk - verified per-resource cloud services and exact S3 suff
   assert.equal(servFailRes, null, 'Resolver ESERVFAIL must never trigger takeover');
 });
 
-test('Live Express API tests: Host header rebinding protection & session token enforcement', async () => {
+test('Live Express API tests: Host header rebinding protection, read routes, session tokens & 429 throttle', async () => {
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
@@ -370,7 +441,23 @@ test('Live Express API tests: Host header rebinding protection & session token e
     });
     assert.equal(goodHostStatus, 200, 'Valid Host header must return 200');
 
-    // 3. POST /api/recon/start without session token returns 403
+    // 3. Read endpoint (GET /api/recon/history) returns 200 without requiring x-reconforge-session header
+    const historyStatus = await new Promise((resolve) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/api/recon/history',
+          method: 'GET',
+          headers: { Host: `127.0.0.1:${port}` },
+        },
+        (res) => resolve(res.statusCode)
+      );
+      req.end();
+    });
+    assert.equal(historyStatus, 200, 'Read route /api/recon/history must return 200 without token header');
+
+    // 4. POST /api/recon/start without session token returns 403
     const noTokenStatus = await new Promise((resolve) => {
       const req = http.request(
         {
@@ -390,7 +477,7 @@ test('Live Express API tests: Host header rebinding protection & session token e
     });
     assert.equal(noTokenStatus, 403, 'Missing session token must return 403');
 
-    // 4. POST /api/recon/start with valid session token returns 200
+    // 5. POST /api/recon/start with valid session token returns 200
     const validTokenStatus = await new Promise((resolve) => {
       const req = http.request(
         {
@@ -410,6 +497,37 @@ test('Live Express API tests: Host header rebinding protection & session token e
       req.end();
     });
     assert.equal(validTokenStatus, 200, 'Valid session token must return 200');
+
+    // 6. Concurrency limit (429 Too Many Requests) when MAX_CONCURRENT_RUNNING scans are active
+    scans.set('concur_1', { id: 'concur_1', status: 'running' });
+    scans.set('concur_2', { id: 'concur_2', status: 'running' });
+    scans.set('concur_3', { id: 'concur_3', status: 'running' });
+
+    const throttledStatus = await new Promise((resolve) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/api/recon/start',
+          method: 'POST',
+          headers: {
+            Host: `127.0.0.1:${port}`,
+            'Content-Type': 'application/json',
+            'x-reconforge-session': SESSION_TOKEN,
+          },
+        },
+        (res) => resolve(res.statusCode)
+      );
+      req.write(JSON.stringify({ domain: 'owasp.org' }));
+      req.end();
+    });
+
+    // Clean up concurrency fixtures
+    scans.delete('concur_1');
+    scans.delete('concur_2');
+    scans.delete('concur_3');
+
+    assert.equal(throttledStatus, 429, 'POST /api/recon/start must return 429 when max concurrent scans reached');
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

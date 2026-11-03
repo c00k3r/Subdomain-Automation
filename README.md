@@ -33,7 +33,7 @@ Unlike basic scanners that blindly curl resolved addresses, ReconForge actively 
 - **Wildcard DNS Handling**: Bypasses dictionary guessing under wildcard zones while preserving all verified passive records from Certificate Transparency and passive DNS.
 - **Subdomain Takeover Verification**: Queries DNS `CNAME` records via `dns.resolveCname`, checks for NXDOMAIN on CNAME targets, strictly evaluates suffixes via `endsWith()`, and classifies findings into calibrated "Likely" and "Potential" certainty tiers.
 
-For in-depth threat modeling and limitations, see [SECURITY.md](SECURITY.md). For deep technical rationale and architecture questions, see [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md).
+For in-depth threat modeling and limitations, see [SECURITY.md](SECURITY.md). For deep technical rationale, see [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md). For precision/recall benchmarks and the engineering postmortem, see [docs/BENCHMARK_AND_WRITEUP.md](docs/BENCHMARK_AND_WRITEUP.md).
 
 ---
 
@@ -43,7 +43,8 @@ For in-depth threat modeling and limitations, see [SECURITY.md](SECURITY.md). Fo
 ReconForge/
 ├── server.js               # Native Node.js engine, SSRF firewall, API routes & SSE streaming
 ├── docs/
-│   └── DESIGN_NOTES.md     # Deep architecture rationale & interview Q&A
+│   ├── DESIGN_NOTES.md     # Security design notes & architecture rationale
+│   └── BENCHMARK_AND_WRITEUP.md # Subfinder benchmark & engineering writeup
 ├── test/
 │   └── sanity.test.js      # Unit tests for domain sanitizer, Punycode, SSRF filter, wildcard DNS, CNAME
 ├── src/
