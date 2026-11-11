@@ -4,7 +4,7 @@
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
 [![Dependabot](https://img.shields.io/badge/dependabot-enabled-blue.svg)](.github/dependabot.yml)
 
-An automated attack surface mapping and service probing suite for security researchers, bug bounty hunters, and penetration testers.
+An automated attack surface mapping and service probing suite for security researchers,VDPs, bug bounty hunters, and penetration testers.
 
 <p align="center">
   <img src="docs/screenshots/reconforge-hero.png" alt="ReconForge Local Web App Interface v2.1" width="880" />
