@@ -213,4 +213,6 @@ ReconForge separates passive discovery from active probing:
 - **Stages 1–4 (Passive Discovery & OSINT)**: Exclusively query publicly aggregated logs (Certificate Transparency logs, AlienVault OTX, HackerTarget) and perform recursive DNS lookups without sending direct HTTP/TCP requests to the target domain infrastructure ("zero target packet exposure").
 - **Stage 5 (Active HTTP Probing)**: Actively initiates HTTP/HTTPS GET/HEAD requests to discovered hosts for title extraction, header fingerprinting, and status classification. This stage is gated behind an explicit permission confirmation checkbox in the UI and must only be performed on domains you own or have explicit written authorization to probe.
 
+Built this project only for education purposes and learning the methodologies.
+
 Never engage in unauthorized active testing against systems without prior consent. Always adhere to responsible testing practices and bug bounty program policies.
