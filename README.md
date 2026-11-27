@@ -214,5 +214,4 @@ ReconForge separates passive discovery from active probing:
 - **Stage 5 (Active HTTP Probing)**: Actively initiates HTTP/HTTPS GET/HEAD requests to discovered hosts for title extraction, header fingerprinting, and status classification. This stage is gated behind an explicit permission confirmation checkbox in the UI and must only be performed on domains you own or have explicit written authorization to probe.
 
 Built this project only for education purposes and learning the methodologies.
-
 Never engage in unauthorized active testing against systems without prior consent. Always adhere to responsible testing practices and bug bounty program policies.
